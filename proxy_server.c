@@ -26,71 +26,6 @@ typedef struct client_args {
     int socket;
 } client_args;
 
-// typedef struct client_args {
-//     sem_t* server_threads_sem;
-//     int socket;
-//     int node_is_empty;
-// } client_args;
-
-// typedef struct client_args_list {
-//     pthread_mutex_t mtx;
-//     client_args* list_args;
-//     int size;
-// } client_args_list;
-
-// int find_empty_index_client_args_list(client_args_list* args_list) {
-//     if (args_list == NULL) {
-//         return INVALID_ARGUMENT;
-//     }
-
-//     int res = NO_EMPTY_NODE;
-//     pthread_mutex_lock(&args_list->mtx);
-//     for (int i = 0; i < args_list->size; i++) {
-//         if (args_list->list_args[i].node_is_empty) {
-//             res = i;
-//             break;
-//         }
-//     }
-//     pthread_mutex_unlock(&args_list->mtx);
-//     return res;
-// }
-
-// int init_client_args_list(client_args_list* list, int size) {
-//     if (list == NULL){
-//         printf("init_client_args_list(): invalid argument");
-//         return INITIALIZATION_ERROR;
-//     }
-
-//     list->list_args = malloc(sizeof(client_args) * size);
-//     if (list->list_args == NULL) {
-//         perror("args list malloc error");
-//         return INITIALIZATION_ERROR;
-//     }
-//     list->size = size;
-
-//     pthread_mutexattr_t attr;
-//     pthread_mutexattr_init(&attr);
-//     pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ERRORCHECK);
-//     pthread_mutex_init(&list->mtx, &attr);
-//     pthread_mutexattr_destroy(&attr);
-
-//     return 0;
-// }
-
-// void destroy_client_args_list(client_args_list* list) {
-//     if (list == NULL || list->size == 0) {
-//         return;
-//     }
-
-//     pthread_mutex_lock(&list->mtx);
-//     if (list->list_args != NULL) {
-//         free(list->list_args);
-//     }
-//     list->size = 0;
-//     pthread_mutex_unlock(&list->mtx);
-//     pthread_mutex_destroy(&list->mtx);
-// }
-
 void handle_client(void* args) {
 
 }
@@ -170,16 +105,10 @@ void run_proxy_server(void* args) {
     struct sockaddr_in client_addr;
     socklen_t addr_len = sizeof(client_addr);
     
-    // int err, index_arg;
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
     pthread_t client_tid;
-
-    // client_args_list args_list;
-    // if (init_client_args_list(&args_list, MAX_THREADS) == -1) {
-    //     return;
-    // }
 
     while (1) {
         client_socket = accept(server_socket, (struct sockaddr*) &client_addr, &addr_len);
@@ -187,13 +116,6 @@ void run_proxy_server(void* args) {
             perror("error accept socket");
             continue;
         }
-
-        // index_arg = find_empty_index_client_args_list(&args_list);
-        // if (index_arg == NO_EMPTY_NODE) {
-        //     printf("unexpectable error with find_empty_index_client_args_list()\n");
-        //     return;
-        // }
-        // client_args* cl_arg = client_args
 
         // Пока пусть просто будет маллок, а то я уже задушился
         // делать что-то адекватное. Потом переделаю, если что
