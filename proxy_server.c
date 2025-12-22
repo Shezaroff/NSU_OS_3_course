@@ -109,6 +109,7 @@ void run_proxy_server(void* args) {
     pthread_attr_init(&attr);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
     pthread_t client_tid;
+    client_args* cl_arg;
 
     while (1) {
         client_socket = accept(server_socket, (struct sockaddr*) &client_addr, &addr_len);
@@ -116,10 +117,12 @@ void run_proxy_server(void* args) {
             perror("error accept socket");
             continue;
         }
+        
+        sem_wait(&server_threads_sem);
 
         // Пока пусть просто будет маллок, а то я уже задушился
         // делать что-то адекватное. Потом переделаю, если что
-        client_args* cl_arg = malloc(sizeof(client_args));
+        cl_arg = malloc(sizeof(client_args));
         if (cl_arg == NULL) {
             perror("error client_args malloc");
             return;
