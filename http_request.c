@@ -4,7 +4,7 @@
 #include <string.h>
 #include <stdio.h>
 
-/*static */const char* http_method_names[] = {
+const char* http_method_names[] = {
     "GET",
     "HEAD",
     "POST"
@@ -16,10 +16,18 @@ void alloc_http_request(http_request** request) {
         return;
     }
 
-    (*request)->method = NOT_IMPLEMENTED;
-    (*request)->target_path = NULL;
-    (*request)->version = NOT_SUPPORTED;
-    STAILQ_INIT(&(*request)->headers);
+    init_http_request(*request);
+    // (*request)->method = NOT_IMPLEMENTED;
+    // (*request)->target_path = NULL;
+    // (*request)->version = NOT_SUPPORTED;
+    // STAILQ_INIT(&(*request)->headers);
+}
+
+void init_http_request(http_request* request) {
+    request->method = NOT_IMPLEMENTED;
+    request->target_path = NULL;
+    request->version = NOT_SUPPORTED;
+    STAILQ_INIT(&request->headers);
 }
 
 void free_http_request(http_request** req) {
@@ -61,6 +69,17 @@ int add_http_header(http_request *request, const char *key, const char *value)
 
     STAILQ_INSERT_TAIL(&request->headers, header, entries);
     return 1;
+}
+
+const char *get_http_header(http_request* request, const char *key) {
+	http_header *item; 
+	STAILQ_FOREACH(item, &request->headers, entries) {
+		if (strcmp(item->key, key) == 0) {
+			return item->value; 
+		}
+	}
+
+	return NULL;
 }
 
 void init_invalid_http_request(http_request* result) {
@@ -126,7 +145,7 @@ void parse_http_request_line(http_request* result, const char* line) {
 void trim_right_space(char* str) {
     size_t len = strlen(str);
     while (len > 0 && (str[len - 1] == ' ' || str[len - 1] == '\t')) {
-        str[len] = '\0';
+        str[len - 1] = '\0';
         len--;
     }
 }
@@ -164,23 +183,4 @@ void parse_http_header(http_request* result, const char* line) {
 
     add_http_header(result, key_part, val_part);
     free(hdr_line);
-}
-
-int main() {
-    http_request* request;
-    alloc_http_request(&request);
-
-    char* line = "GET / HTTP/1.1\r\n";
-    char* line2 = "Host: www.example.re\r\n";
-    char* line3 = "Range: bytes=0-511\r\n";
-
-    parse_http_request_line(request, line);
-    parse_http_header(request, line2);
-    parse_http_header(request, line3);
-    printf("%s\n", request->target_path);
-    http_header *hdr;
-    STAILQ_FOREACH(hdr, &request->headers, entries) {
-        printf("%s: %s\n", hdr->key, hdr->value);
-    }
-    free_http_request(&request);
 }

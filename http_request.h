@@ -41,9 +41,13 @@ typedef struct http_request {
 
 void alloc_http_request(http_request** request);
 
+void init_http_request(http_request* request);
+
 void free_http_request(http_request** req);
 
 int add_http_header(http_request *request, const char *key, const char *value);
+
+const char *get_http_header(http_request* request, const char *key);
 
 void parse_http_request_line(http_request* result, const char* line);
 
