@@ -453,6 +453,31 @@ int proxy_body(int from_sock, int to_sock,http_reader_state *st, char *io_buf,
     return 0;
 }
 
+int proxy_response_and_maybe_cache(int upstream_sock, int client_sock, int do_cache, dynbuf *resp_acc) {
+    char buf[8192];
+
+    while (1) {
+        ssize_t n = recv(upstream_sock, buf, sizeof(buf), 0);
+        if (n == 0) {
+            return 0;
+        }
+        if (n < 0) {
+            return -1;
+        }
+
+        if (do_cache) {
+            if (add_dynbuf(resp_acc, buf, (size_t)n) != 0) {
+                do_cache = 0;
+            }
+        }
+
+        if (send_all(client_sock, buf, (size_t)n) != 0) {
+            return -1;
+        }
+    }
+}
+
+
 
 long parse_content_length_from_header_line(const char *line) {
     const char *p = line;

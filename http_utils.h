@@ -49,4 +49,8 @@ long parse_content_length_from_header_line(const char *line);
 
 int proxy_response(int upstream_sock, int client_sock);
 
+const char* from_absolute_path(const char *target, char *tmp, size_t tmp_cap);
+
+int proxy_response_and_maybe_cache(int upstream_sock, int client_sock, int do_cache, dynbuf *resp_acc);
+
 #endif

@@ -1,5 +1,5 @@
 TARGET = proxy_server
-SRCS = dynamic_buffer.c http_request.c http_utils.c proxy_server.c
+SRCS = dynamic_buffer.c http_request.c http_utils.c proxy_server.c cache_map.c cleanup_thread.c
 
 CC=gcc
 RM=rm

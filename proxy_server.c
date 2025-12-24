@@ -15,6 +15,8 @@
 #include "http_request.h"
 #include "dynamic_buffer.h"
 #include "http_utils.h"
+#include "cache_map.h"
+#include "cleanup_thread.h"
 
 #define INITIALIZATION_ERROR -1
 #define INVALID_SERVER_PORT -1
@@ -24,6 +26,8 @@
 
 #define REQUEST_QUEUE_SIZE 32
 #define MAX_THREADS 2
+
+static Cache_Map cache;
 
 typedef struct client_args {
     sem_t* server_threads_sem;
@@ -78,6 +82,35 @@ void* handle_client(void* vargs)
         }
     }
 
+    char cache_key[2048];
+    int cacheable = 0;
+
+    if (ok) {
+        cacheable = (req->method == GET) && (req_cl <= 0);
+
+        if (cacheable) {
+            if (build_cache_key(cache_key, sizeof(cache_key), host, port, req) != 0) {
+                cacheable = 0;
+            }
+        }
+
+        if (cacheable) {
+            char *cached = NULL;
+            size_t cached_len = 0;
+
+            int grc = get_cache_map(&cache, cache_key, &cached, &cached_len);
+            if (grc == 0) {
+                if (send_all(client_sock, cached, cached_len) != 0) {
+                }
+                free(cached);
+                ok = 0;           
+                need_502 = 0;   
+            } else if (grc < 0) {
+                cacheable = 0;
+            }
+        }
+    }
+
     if (ok) {
         host_sock = connect_hots(host, port);
         if (host_sock < 0) {
@@ -125,13 +158,31 @@ void* handle_client(void* vargs)
         }
     }
 
+    dynbuf resp_acc = {0};
+    int resp_ok = 0;
 
     if (ok) {
-        if (proxy_response(host_sock, client_sock) != 0) {
+        resp_ok = (proxy_response_and_maybe_cache(host_sock, client_sock, cacheable, &resp_acc) == 0);
+        if (!resp_ok) {
             ok = 0;
             need_502 = 0;
         }
     }
+
+    if (resp_ok && cacheable) {
+        // add_cache_map у тебя принимает ssize_t size, поэтому аккуратно приводим
+        if (resp_acc.len <= (size_t)SSIZE_MAX) {
+            (void)add_cache_map(&cache, cache_key, (const char*)resp_acc.data, (ssize_t)resp_acc.len);
+            // если -1 -> просто игнорируем (как ты и хочешь)
+        }
+    }
+
+    // if (ok) {
+    //     if (proxy_response(host_sock, client_sock) != 0) {
+    //         ok = 0;
+    //         need_502 = 0;
+    //     }
+    // }
 
     if (!ok && need_502) {
         send_simple_502(client_sock);
@@ -147,6 +198,7 @@ void* handle_client(void* vargs)
     free(host);
     free(port);
 
+    free_dynbuf(&resp_acc);
     free_dynbuf(&built_raw_req);
     if (req != NULL) {
         free_http_request(&req);
@@ -276,6 +328,25 @@ void* run_proxy_server(void* args) {
 int main() {
     signal(SIGPIPE, SIG_IGN);
 
+    init_cache_map(&cache);
+    pthread_t cleaner_tid;
+    cache_cleaner_args *ca = malloc(sizeof(*ca));
+    if (!ca) {
+        perror("error malloc cache_cleaner_args");
+    } else {
+        ca->map = &cache;
+        ca->interval_sec = 5;                 
+        ca->max_size_bytes = MAX_SIZE_CACHE_MAP;
+        ca->percent_for_del = 50;
+
+        if (pthread_create(&cleaner_tid, NULL, cache_cleaner_thread, ca) != 0) {
+            perror("error creating cache cleaner thread");
+            free(ca);
+        } else {
+            pthread_detach(cleaner_tid);
+        }
+    }
+
     pthread_t server_thread;
 
     if (pthread_create(&server_thread, NULL, run_proxy_server, NULL) != 0) {
@@ -285,5 +356,10 @@ int main() {
 
     pthread_join(server_thread, NULL);
 
+    destroy_cache_map(&cache);
+
     return 0;
 }
+
+// curl -L --http1.0   -x http://127.0.0.1:5423   -o debian1.iso   http://cdimage.debian.org/debian-cd/current/amd64/iso-cd/debian-13.2.0-amd64-netinst.iso
+// curl -L --http1.0   -x http://127.0.0.1:5423   -o debian4.iso   http://cdimage.debian.org/debian-cd/current/arm64/iso-cd/debian-13.2.0-arm64-netinst.iso
