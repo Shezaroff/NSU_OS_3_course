@@ -1,5 +1,6 @@
 #include <string.h>
 #include <stdio.h>
+#include <limits.h>
 #include "cache_map.h"
 #include "http_request.h"
 #include "http_utils.h"
@@ -31,43 +32,8 @@ void destroy_cache_map(Cache_Map* map) {
     pthread_rwlock_destroy(&map->lock);
 }
 
-int get_cache_map(Cache_Map* map, const char* key, char** out, size_t* out_size) {
-    if (map == NULL || key == NULL) {
-        return -1;
-    }
-
-    pthread_rwlock_rdlock(&map->lock);
-    Cache_Node* current = map->first;
-    
-    atomic_fetch_add_explicit(&map->num_requests, 1, memory_order_relaxed);
-
-    while (current != NULL) {
-        if (strcmp(key, current->key) == 0) {
-            atomic_fetch_add_explicit(&current->hits, 1, memory_order_relaxed);
-            if (out != NULL && out_size != NULL) {
-                char* buf = malloc(current->size);
-                if (buf == NULL) { 
-                    pthread_rwlock_unlock(&map->lock);
-                    return -1; 
-                }
-                memcpy(buf, current->response, current->size);
-                *out = buf;
-                *out_size = current->size;
-            }
-            pthread_rwlock_unlock(&map->lock);
-            return 0;
-        }
-        // tmp = current->next;
-        current = current->next;
-    }
-
-    pthread_rwlock_unlock(&map->lock);
-
-    return 1;
-}
-
-int alloc_cache_node(Cache_Node** node) {
-    if (node == NULL) {
+int alloc_cache_node(Cache_Node** node, const char* key) {
+    if (node == NULL || key == NULL) {
         return -1;
     }
     *node = malloc(sizeof(Cache_Node));
@@ -75,12 +41,28 @@ int alloc_cache_node(Cache_Node** node) {
         return -1;
     }
 
-    (*node)->key = NULL;
-    (*node)->response = NULL;
-    (*node)->size = 0;
+    (*node)->key = strdup(key);
+    if ((*node)->key == NULL) {
+        free((*node));
+        return -1;
+    }
+    (*node)->response.data = NULL;
+    (*node)->response.len = 0;
+    (*node)->response.cap = 0;
+
+    (*node)->eof = 0;
+    (*node)->error = 0;
+
+    (*node)->content_length = -1;
+    (*node)->base_offset = 0;
+
+    (*node)->readers = NULL;
+    (*node)->readers_num = 0;
+
+    pthread_mutex_init(&(*node)->mutex, NULL);
+    pthread_cond_init(&(*node)->cond_var, NULL);
+
     (*node)->next = NULL;
-    (*node)->hits = 0;
-    // pthread_rwlock_init(&(*node)->lock, NULL);
     return 0;
 } 
 
@@ -92,65 +74,59 @@ void destroy_cache_node(Cache_Node** node) {
     if ((*node)->key != NULL) {
         free((*node)->key);
     } 
-    if ((*node)->response != NULL) {
-        free((*node)->response);
-    } 
+    free_dynbuf(&(*node)->response);
 
-    // pthread_rwlock_destroy(&(*node)->lock);
+    Cache_Reader* current = (*node)->readers, *tmp;
+    while (current != NULL) {
+        tmp = current->next;
+        free(current);
+        current = tmp;
+    }
+
+    pthread_mutex_destroy(&(*node)->mutex);
+    pthread_cond_destroy(&(*node)->cond_var);
 
     free(*node);
     *node = NULL;
 }
 
-int add_cache_map(Cache_Map* map, const char* key, const char* response, size_t size) {
-    if (map == NULL || key == NULL || response == NULL || size > MAX_SIZE_CACHE_NODE) {
+int get_set_cache_map(Cache_Map* map, const char* key, 
+                      Cache_Node** out_node, int* created) {
+    if (map == NULL || key == NULL || out_node == NULL || created == NULL) {
         return -1;
     }
-    
-    Cache_Node* node;
-    if (alloc_cache_node(&node) == -1) {
-        return -1;
-    }
-
-    node->key = strdup(key);
-    if (node->key == NULL) {
-        destroy_cache_node(&node);
-        return -1;
-    }
-    node->response = malloc(size);
-    if (node->response == NULL) {
-        destroy_cache_node(&node);
-        return -1;
-    }
-    memcpy(node->response, response, size);
-    node->size = size;
-
-    // if (get_cache_map(map, key, NULL, NULL) == 0) {
-    //     return -1;
-    // }
 
     pthread_rwlock_wrlock(&map->lock);
 
-    if (map->total_size + size > MAX_SIZE_CACHE_MAP) {
+    Cache_Node* current = map->first;
+    while (current != NULL) {
+        if (strcmp(current->key, key) == 0) {
+            pthread_mutex_lock(&current->mutex);
+            current->readers_num++;
+            pthread_mutex_unlock(&current->mutex);
+
+            *out_node = current;
+            *created = 0;
+            pthread_rwlock_unlock(&map->lock);
+            return 0;
+        }
+        current = current->next;
+    }
+    Cache_Node* new_node;
+    if (alloc_cache_node(&new_node, key) == -1) {
         pthread_rwlock_unlock(&map->lock);
-        destroy_cache_node(&node);
         return -1;
     }
-    
-    Cache_Node* current = map->first, *tmp;
-    while (current != NULL) {
-        tmp = current->next;
-        if (strcmp(current->key, key) == 0) {
-            pthread_rwlock_unlock(&map->lock);
-            destroy_cache_node(&node);
-            return -1;
-        }
-        current = tmp;
-    }
 
-    node->next = map->first;
-    map->first = node;
-    map->total_size += node->size;
+    pthread_mutex_lock(&new_node->mutex);
+    new_node->readers = 1;
+    pthread_mutex_unlock(&new_node->mutex);
+    new_node->next = map->first;
+    map->first = new_node;
+
+    *out_node = new_node;
+    *created = 1;
+
     pthread_rwlock_unlock(&map->lock);
     return 0;
 }
@@ -167,6 +143,150 @@ int build_cache_key(char* dst, size_t cap,
     int n = snprintf(dst, cap, "GET %s:%s%s", host, port, path);
     if (n < 0 || (size_t)n >= cap) {
         return -1;
+    }
+    return 0;
+}
+
+int add_reader_cache_node(Cache_Node* node, Cache_Reader** reader/*,int socket*/) {
+    if (reader == NULL || node == NULL) {
+        return -1;
+    }
+
+    *reader = malloc(sizeof(Cache_Reader));
+    if (*reader == NULL) {
+        return -1;
+    }
+
+    pthread_mutex_lock(&node->mutex);
+    (*reader)->offset = 0;
+    (*reader)->dead = 0;
+    (*reader)->next = node->readers;
+    node->readers = *reader;
+    return 0;
+}
+
+void remove_reader_cache_node(Cache_Node* node, Cache_Reader** reader) {
+    if (reader == NULL || node == NULL) {
+        return;
+    }
+
+    pthread_mutex_lock(&node->mutex);
+    Cache_Reader **prev_ptr = &node->readers;
+    while (*prev_ptr != NULL) {
+        if (*prev_ptr == *reader) {
+            *prev_ptr = (*reader)->next;
+            node->readers_num--;
+            break;
+        }
+        prev_ptr = &(*prev_ptr)->next;
+    }
+
+    pthread_mutex_unlock(&node->mutex);
+    // с барского плеча зафришу, даже если не нашел
+    free(*reader);
+    *reader = NULL;
+}
+
+// надо захватывать мутекс заранее
+void trim_cache_node(Cache_Node* node) {
+    size_t min = SIZE_MAX;
+    Cache_Reader* reader = node->readers;
+    while (reader != NULL) {
+        if (!reader->dead && reader->offset < min) {
+            min = reader->offset;
+        }
+        reader = reader->next;
+    }
+
+    if (min == SIZE_MAX) {
+        return;
+    }
+
+    if (min <= node->base_offset) {
+        print(stderr, "unexpected error in trim_cache_node()\n");
+        // по-моему, такой ситуации просто не должно случиться
+        // но если все же когда-то случится, то нужно
+        // для этого клиента создавать отдельное новое
+        // соединение с хостом, чтобы точно все передать
+        return;
+    }
+    size_t cut = min - node->base_offset;
+    if (cut > node->response.len) {
+        cut = node->response.len;
+        // такого тоже не должно случиться, но тут
+        // есть некая страховочка, над которой я не задумывался особо
+        print(stderr, "another unexpected error in trim_cache_node()\n");
+    }
+
+    if (cut == 0) {
+        return;
+    }
+
+    memmove(node->response.data, node->response.data + cut, node->response.len - cut);
+    node->response.len -= cut;
+    node->base_offset += cut;
+}
+
+// надо до вызова этой функции проверять, не стоит ли состояние PASS
+// у записи кэша, чтобы не пытаться из нее читать.
+int stream_from_cache_node(Cache_Node* node, Cache_Reader *reader) {
+    char buffer[8192];
+
+    while (1) {
+        pthread_mutex_lock(&node->mutex);
+
+        while (!node->error && !node->eof && reader->offset >= node->recv_cnt) {
+            pthread_cond_wait(&node->cond_var, &node->mutex);
+        }
+
+        if (node->error) {
+            pthread_mutex_unlock(&node->mutex);
+            return -1;
+        }
+
+        if (reader->offset >= node->recv_cnt && node->eof) {
+            pthread_mutex_unlock(&node->mutex);
+            return 0;
+        }
+
+        if (reader->offset < node->base_offset) {
+            pthread_mutex_unlock(&node->mutex);
+            print(stderr, "unexpected error in stream_from_cache_node()\n");
+            return -1;
+        }
+
+        size_t start_in_response = reader->offset - node->base_offset;
+        size_t ready_in_buffer = 0;
+        if (start_in_response < node->response.len) {
+            ready_in_buffer = node->response.len - start_in_response;
+        }
+        size_t ready_total = node->recv_cnt - reader->offset;
+        if (ready_in_buffer > ready_total) {
+            // тоже какая-то странная ситуация:
+            // получается что фактически доступное в буфере
+            // больше доступного по расчетам
+            print(stderr, "maybe?? unexpected?? error in stream_from_cache_node()\n");
+            ready_in_buffer = ready_total;
+        }
+        if (ready_in_buffer > sizeof(buffer)) {
+            ready_in_buffer = sizeof(buffer);
+        }
+
+        memcpy(buffer, node->response.data + start_in_response, ready_in_buffer);
+        pthread_mutex_unlock(&node->mutex);
+
+        if (send_all(reader->socket, buffer, ready_in_buffer) != 0) {
+            pthread_mutex_lock(&node->mutex);
+            reader->dead = 1;
+            trim_cache_node(node);
+            pthread_mutex_unlock(&node->mutex);
+            return -1;           
+        }
+
+        pthread_mutex_lock(&node->mutex);
+        reader->offset += ready_in_buffer;
+        trim_cache_node(node);
+        pthread_mutex_unlock(&node->mutex);
     }
     return 0;
 }
