@@ -125,9 +125,9 @@ int add_cache_map(Cache_Map* map, const char* key, const char* response, size_t 
     memcpy(node->response, response, size);
     node->size = size;
 
-    if (get_cache_map(map, key, NULL, NULL) == 0) {
-        return -1;
-    }
+    // if (get_cache_map(map, key, NULL, NULL) == 0) {
+    //     return -1;
+    // }
 
     pthread_rwlock_wrlock(&map->lock);
 
@@ -137,16 +137,16 @@ int add_cache_map(Cache_Map* map, const char* key, const char* response, size_t 
         return -1;
     }
     
-    // Cache_Node* current = map->first, *tmp;
-    // while (current != NULL) {
-    //     tmp = current->next;
-    //     if (strcmp(current->key, key) == 0) {
-    //         pthread_rwlock_unlock(&map->lock);
-    //         destroy_cache_node(&node);
-    //         return -1;
-    //     }
-    //     current = tmp;
-    // }
+    Cache_Node* current = map->first, *tmp;
+    while (current != NULL) {
+        tmp = current->next;
+        if (strcmp(current->key, key) == 0) {
+            pthread_rwlock_unlock(&map->lock);
+            destroy_cache_node(&node);
+            return -1;
+        }
+        current = tmp;
+    }
 
     node->next = map->first;
     map->first = node;

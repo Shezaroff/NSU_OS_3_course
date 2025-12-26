@@ -87,20 +87,20 @@ int delete_cache(Cache_Map *map, size_t max_size_bytes, size_t percent_for_del) 
 
     uint32_t cutoff = atomic_load_explicit(&arr[k - 1]->hits, memory_order_relaxed);
 
-    Cache_Node **pp = &map->first;
-    while (*pp) {
-        Cache_Node *cur = *pp;
+    Cache_Node **prev_ptr = &map->first;
+    while (*prev_ptr) {
+        Cache_Node *cur = *prev_ptr;
         uint32_t h = atomic_load_explicit(&cur->hits, memory_order_relaxed);
 
         if (h <= cutoff) {
-            *pp = cur->next;
+            *prev_ptr = cur->next;
             map->total_size -= cur->size;
             destroy_cache_node(&cur);
             continue;
         }
 
         atomic_store_explicit(&cur->hits, 0, memory_order_relaxed);
-        pp = &cur->next;
+        prev_ptr = &cur->next;
     }
 
     atomic_store_explicit(&map->num_requests, 0, memory_order_relaxed);

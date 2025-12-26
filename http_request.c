@@ -10,6 +10,13 @@ const char* http_method_names[] = {
     "POST"
 };
 
+void init_http_request(http_request* request) {
+    request->method = NOT_IMPLEMENTED;
+    request->target_path = NULL;
+    request->version = NOT_SUPPORTED;
+    STAILQ_INIT(&request->headers);
+}
+
 void alloc_http_request(http_request** request) {
     *request = malloc(sizeof(http_request));
     if (*request == NULL) {
@@ -23,12 +30,6 @@ void alloc_http_request(http_request** request) {
     // STAILQ_INIT(&(*request)->headers);
 }
 
-void init_http_request(http_request* request) {
-    request->method = NOT_IMPLEMENTED;
-    request->target_path = NULL;
-    request->version = NOT_SUPPORTED;
-    STAILQ_INIT(&request->headers);
-}
 
 void free_http_request(http_request** req) {
     if (req == NULL || *req == NULL) {
@@ -74,7 +75,7 @@ int add_http_header(http_request *request, const char *key, const char *value)
 const char *get_http_header(http_request* request, const char *key) {
 	http_header *item; 
 	STAILQ_FOREACH(item, &request->headers, entries) {
-		if (strcmp(item->key, key) == 0) {
+		if (strcasecmp(item->key, key) == 0) {
 			return item->value; 
 		}
 	}

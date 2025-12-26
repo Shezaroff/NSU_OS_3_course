@@ -170,10 +170,8 @@ void* handle_client(void* vargs)
     }
 
     if (resp_ok && cacheable) {
-        // add_cache_map у тебя принимает ssize_t size, поэтому аккуратно приводим
         if (resp_acc.len <= (size_t)SSIZE_MAX) {
-            (void)add_cache_map(&cache, cache_key, (const char*)resp_acc.data, (ssize_t)resp_acc.len);
-            // если -1 -> просто игнорируем (как ты и хочешь)
+            add_cache_map(&cache, cache_key, (const char*)resp_acc.data, resp_acc.len);
         }
     }
 
@@ -268,6 +266,11 @@ int parse_port(const char *env_port) {
 void* run_proxy_server(void* args) {
     int server_socket;
     char *env_port = getenv("PROXY_PORT");
+    if (env_port == NULL) {
+        printf("ERRRRORORORORO\n");
+        exit(EXIT_FAILURE);
+    }
+    // printf("%s\n", env_port);
     int port = parse_port(env_port);
     if (port == INVALID_SERVER_PORT) {
         port = 5423;
