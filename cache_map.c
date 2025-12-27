@@ -53,6 +53,9 @@ int alloc_cache_node(Cache_Node** node, const char* key) {
     (*node)->eof = 0;
     (*node)->error = 0;
 
+    (*node)->abort_pass = 0;
+    (*node)->response_freed = 0;
+
     (*node)->content_length = -1;
     (*node)->base_offset = 0;
 
@@ -176,6 +179,9 @@ void remove_reader_cache_node(Cache_Node* node, Cache_Reader** reader) {
         if (*prev_ptr == *reader) {
             *prev_ptr = (*reader)->next;
             node->readers_num--;
+            if (node->readers_num == 0 && node->state == PASS) {
+                node->abort_pass = 1;
+            }
             break;
         }
         prev_ptr = &(*prev_ptr)->next;

@@ -7,6 +7,15 @@ void add_cache_node(Cache_Node* node, const void* data, size_t n) {
     node->recv_cnt += n;
 }
 
+void maybe_change_to_pass(Cache_Node* node) {
+    if (node->state != PASS) {
+        node->state = PASS;
+    }
+    if (node->readers_num == 0) {
+        node->abort_pass = 1;
+    }
+}
+
 void* reciever_thread(void* arg) {
     receiver_args* a = arg;
     Cache_Node* node = a->cache_node;
@@ -46,6 +55,7 @@ void* reciever_thread(void* arg) {
             ok = 0;
             break;
         }
+        // return NULL;
 
         if (content_length < 0) {
             long maybe_cl = parse_content_length_from_header_line(chunk.data);
@@ -55,10 +65,19 @@ void* reciever_thread(void* arg) {
         }
 
         pthread_mutex_lock(&node->mutex);
+
+        if (node->abort_pass) {
+            pthread_mutex_unlock(&node->mutex);
+            free(chunk.data);
+            close(sock);
+            ok = 0;
+            break;
+        }
+
         add_cache_node(node, chunk.data, chunk.len);
 
-        if (content_length > (long)MAX_SIZE_CACHE_NODE && node->state != PASS) {
-            node->state = PASS;
+        if (content_length > (long)MAX_SIZE_CACHE_NODE) {
+            maybe_change_to_pass(node);
         }
 
         pthread_cond_broadcast(&node->cond_var);
@@ -79,10 +98,18 @@ void* reciever_thread(void* arg) {
 
         pthread_mutex_lock(&node->mutex);
 
+        if (node->abort_pass) {
+            pthread_mutex_unlock(&node->mutex);
+            free(chunk.data);
+            close(sock);
+            ok = 0;
+            break;
+        }
+
         add_cache_node(node, chunk.data, chunk.len);
 
-        if (node->recv_cnt > MAX_SIZE_CACHE_NODE && node->state != PASS) {
-            node->state = PASS;
+        if (node->recv_cnt > MAX_SIZE_CACHE_NODE) {
+            maybe_change_to_pass(node);
         }
 
         pthread_cond_broadcast(&node->cond_var);
@@ -99,6 +126,18 @@ void* reciever_thread(void* arg) {
         if (node->state != PASS) {
             node->state = DONE;
         }
+        pthread_cond_broadcast(&node->cond_var);
+        pthread_mutex_unlock(&node->mutex);
+    } else {
+        pthread_mutex_lock(&node->mutex);
+        node->state = PASS;
+        if (!node->response_freed) {
+            free_dynbuf(&node->response);
+            node->recv_cnt = 0;
+            node->base_offset = 0;
+            node->response_freed = 1;
+        }
+        node->eof = 1;
         pthread_cond_broadcast(&node->cond_var);
         pthread_mutex_unlock(&node->mutex);
     }
