@@ -59,6 +59,8 @@ int alloc_cache_node(Cache_Node** node, const char* key) {
     (*node)->readers = NULL;
     (*node)->readers_num = 0;
 
+    (*node)->state = IN_PROGRESS;
+
     pthread_mutex_init(&(*node)->mutex, NULL);
     pthread_cond_init(&(*node)->cond_var, NULL);
 
@@ -101,10 +103,6 @@ int get_set_cache_map(Cache_Map* map, const char* key,
     Cache_Node* current = map->first;
     while (current != NULL) {
         if (strcmp(current->key, key) == 0) {
-            pthread_mutex_lock(&current->mutex);
-            current->readers_num++;
-            pthread_mutex_unlock(&current->mutex);
-
             *out_node = current;
             *created = 0;
             pthread_rwlock_unlock(&map->lock);
@@ -119,7 +117,7 @@ int get_set_cache_map(Cache_Map* map, const char* key,
     }
 
     pthread_mutex_lock(&new_node->mutex);
-    new_node->readers = 1;
+    new_node->readers_num = 1;
     pthread_mutex_unlock(&new_node->mutex);
     new_node->next = map->first;
     map->first = new_node;
@@ -158,10 +156,12 @@ int add_reader_cache_node(Cache_Node* node, Cache_Reader** reader/*,int socket*/
     }
 
     pthread_mutex_lock(&node->mutex);
+    node->readers_num++;
     (*reader)->offset = 0;
     (*reader)->dead = 0;
     (*reader)->next = node->readers;
     node->readers = *reader;
+    pthread_mutex_unlock(&node->mutex);
     return 0;
 }
 
@@ -189,6 +189,9 @@ void remove_reader_cache_node(Cache_Node* node, Cache_Reader** reader) {
 
 // надо захватывать мутекс заранее
 void trim_cache_node(Cache_Node* node) {
+    if (node->state != PASS) {
+        return;
+    }
     size_t min = SIZE_MAX;
     Cache_Reader* reader = node->readers;
     while (reader != NULL) {
@@ -202,8 +205,8 @@ void trim_cache_node(Cache_Node* node) {
         return;
     }
 
-    if (min <= node->base_offset) {
-        print(stderr, "unexpected error in trim_cache_node()\n");
+    if (min < node->base_offset) {
+        fprintf(stderr, "unexpected error in trim_cache_node()\n");
         // по-моему, такой ситуации просто не должно случиться
         // но если все же когда-то случится, то нужно
         // для этого клиента создавать отдельное новое
@@ -215,7 +218,7 @@ void trim_cache_node(Cache_Node* node) {
         cut = node->response.len;
         // такого тоже не должно случиться, но тут
         // есть некая страховочка, над которой я не задумывался особо
-        print(stderr, "another unexpected error in trim_cache_node()\n");
+        fprintf(stderr, "another unexpected error in trim_cache_node()\n");
     }
 
     if (cut == 0) {
@@ -251,7 +254,7 @@ int stream_from_cache_node(Cache_Node* node, Cache_Reader *reader) {
 
         if (reader->offset < node->base_offset) {
             pthread_mutex_unlock(&node->mutex);
-            print(stderr, "unexpected error in stream_from_cache_node()\n");
+            fprintf(stderr, "unexpected error in stream_from_cache_node()\n");
             return -1;
         }
 
@@ -265,7 +268,7 @@ int stream_from_cache_node(Cache_Node* node, Cache_Reader *reader) {
             // тоже какая-то странная ситуация:
             // получается что фактически доступное в буфере
             // больше доступного по расчетам
-            print(stderr, "maybe?? unexpected?? error in stream_from_cache_node()\n");
+            fprintf(stderr, "maybe?? unexpected?? error in stream_from_cache_node()\n");
             ready_in_buffer = ready_total;
         }
         if (ready_in_buffer > sizeof(buffer)) {

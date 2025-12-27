@@ -17,6 +17,7 @@
 #include "http_utils.h"
 #include "cache_map.h"
 #include "cleanup_thread.h"
+#include "host_receiver_thread.h"
 
 #define INITIALIZATION_ERROR -1
 #define INVALID_SERVER_PORT -1
@@ -25,7 +26,7 @@
 
 
 #define REQUEST_QUEUE_SIZE 32
-#define MAX_THREADS 2
+#define MAX_THREADS 512
 
 static Cache_Map cache;
 
@@ -82,12 +83,19 @@ void* handle_client(void* vargs)
         }
     }
 
+    dynbuf built_raw_req = {0};
+    if (ok) {
+        if (build_request(req, &built_raw_req) != 0) {
+            ok = 0;
+            need_502 = 1;
+        }
+    }
+
     char cache_key[2048];
     int cacheable = 0;
 
     if (ok) {
         cacheable = (req->method == GET) && (req_cl <= 0);
-
         if (cacheable) {
             if (build_cache_key(cache_key, sizeof(cache_key), host, port, req) != 0) {
                 cacheable = 0;
@@ -95,18 +103,109 @@ void* handle_client(void* vargs)
         }
 
         if (cacheable) {
-            char *cached = NULL;
-            size_t cached_len = 0;
+            Cache_Node* node = NULL;
+            int created = 0;
 
-            int grc = get_cache_map(&cache, cache_key, &cached, &cached_len);
-            if (grc == 0) {
-                if (send_all(client_sock, cached, cached_len) != 0) {
-                }
-                free(cached);
-                ok = 0;           
-                need_502 = 0;   
-            } else if (grc < 0) {
+            if (get_set_cache_map(&cache, cache_key, &node, &created) != 0) {
                 cacheable = 0;
+            } else {
+                pthread_mutex_lock(&node->mutex);
+                cache_node_state st_node = node->state;
+                pthread_mutex_unlock(&node->mutex);
+
+                if (!created && st_node == PASS) {
+                    cacheable = 0;
+                } else {
+                    if (created) {
+                        receiver_args* recv_args = malloc(sizeof(receiver_args));
+                        if (recv_args == NULL) {
+                            pthread_mutex_lock(&node->mutex);
+                            node->error = 1;
+                            pthread_cond_broadcast(&node->cond_var);
+                            pthread_mutex_unlock(&node->mutex);
+
+                            cacheable = 0;
+                        } else {
+                            recv_args->cache_node = node;
+                            recv_args->host = strdup(host);
+                            recv_args->port = strdup(port);
+
+                            recv_args->req_data = malloc(built_raw_req.len);
+                            if (recv_args->host == NULL || recv_args->port == NULL || recv_args->req_data == NULL) {
+                                free(recv_args->host); 
+                                free(recv_args->port); 
+                                free(recv_args->req_data);
+                                free(recv_args);
+
+                                pthread_mutex_lock(&node->mutex);
+                                node->error = 1;
+                                pthread_cond_broadcast(&node->cond_var);
+                                pthread_mutex_unlock(&node->mutex);
+
+                                cacheable = 0;
+                            } else {
+                                memcpy(recv_args->req_data, built_raw_req.data, built_raw_req.len);
+                                recv_args->req_len = built_raw_req.len;
+
+                                pthread_t recv_thread;
+                                if (pthread_create(&recv_thread, NULL, reciever_thread, recv_args) != 0) {
+                                    pthread_mutex_lock(&node->mutex);
+                                    node->error = 1;
+                                    pthread_cond_broadcast(&node->cond_var);
+                                    pthread_mutex_unlock(&node->mutex);
+
+                                    free(recv_args->host); 
+                                    free(recv_args->port); 
+                                    free(recv_args->req_data);
+                                    free(recv_args);
+
+                                    cacheable = 0;
+                                } else {
+                                    pthread_detach(recv_thread);
+                                }
+                            }
+                        }
+                    }
+
+                    pthread_mutex_lock(&node->mutex);
+                    size_t base = node->base_offset;
+                    cache_node_state st_node = node->state;
+                    pthread_mutex_unlock(&node->mutex);
+
+                    if (!created && base > 0) {
+                        cacheable = 0;
+                    }
+
+
+                    if (cacheable) {
+                        Cache_Reader *reader = NULL;
+                        if (add_reader_cache_node(node, &reader) != 0) {
+                            pthread_mutex_lock(&node->mutex);
+                            if (node->readers_num > 0) {
+                                node->readers_num--;
+                            }
+                            pthread_mutex_unlock(&node->mutex);
+
+                            cacheable = 0;
+                        } else {
+                            reader->socket = client_sock;
+
+                            stream_from_cache_node(node, reader);
+
+                            remove_reader_cache_node(node, &reader);
+
+                            ok = 0;
+                            need_502 = 0;
+
+                            if (client_sock >= 0) {
+                                close(client_sock);
+                                client_sock = -1;
+                            }
+
+                            ok = 0;
+                        }
+                    }
+                }
             }
         }
     }
@@ -119,13 +218,7 @@ void* handle_client(void* vargs)
         }
     }
 
-    dynbuf built_raw_req = {0};
-    if (ok) {
-        if (build_request(req, &built_raw_req) != 0) {
-            ok = 0;
-            need_502 = 1;
-        }
-    }
+    
 
     if (ok) {
         if (send_all(host_sock, built_raw_req.data, built_raw_req.len) != 0) {
@@ -158,31 +251,14 @@ void* handle_client(void* vargs)
         }
     }
 
-    dynbuf resp_acc = {0};
-    int resp_ok = 0;
-
     if (ok) {
-        resp_ok = (proxy_response_and_maybe_cache(host_sock, client_sock, cacheable, &resp_acc) == 0);
-        if (!resp_ok) {
+        if (proxy_response(host_sock, client_sock) != 0) {
             ok = 0;
             need_502 = 0;
         }
     }
 
-    if (resp_ok && cacheable) {
-        if (resp_acc.len <= (size_t)SSIZE_MAX) {
-            add_cache_map(&cache, cache_key, (const char*)resp_acc.data, resp_acc.len);
-        }
-    }
-
-    // if (ok) {
-    //     if (proxy_response(host_sock, client_sock) != 0) {
-    //         ok = 0;
-    //         need_502 = 0;
-    //     }
-    // }
-
-    if (!ok && need_502) {
+    if (!ok && need_502 && client_sock >= 0) {
         send_simple_502(client_sock);
     }
 
@@ -196,7 +272,6 @@ void* handle_client(void* vargs)
     free(host);
     free(port);
 
-    free_dynbuf(&resp_acc);
     free_dynbuf(&built_raw_req);
     if (req != NULL) {
         free_http_request(&req);

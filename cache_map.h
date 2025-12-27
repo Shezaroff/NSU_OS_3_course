@@ -10,7 +10,7 @@
 #include "http_request.h"
 #include "dynamic_buffer.h"
 
-#define MAX_SIZE_CACHE_NODE (1ULL * 1024 * 1024 * 1024)
+#define MAX_SIZE_CACHE_NODE (1ULL * 500 * 1024 * 1024)
 #define MAX_SIZE_CACHE_MAP (2ULL * 1024 * 1024 * 1024)
 
 typedef enum {
