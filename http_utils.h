@@ -37,7 +37,7 @@ int parse_host_and_port(http_request* req, char** out_host, char** out_port);
 
 int build_request(const http_request *req, dynbuf *out);
 
-int connect_hots(const char* host, const char* port);
+int connect_host(const char* host, const char* port);
 
 int read_and_parse_request_head(int client_sock, http_reader_state *st, char *io_buf, size_t io_cap, 
                                 size_t *io_len, http_request *req_out, long *content_length_out);

@@ -11,7 +11,7 @@ void init_cache_map(Cache_Map* map) {
     }
 
     map->first = NULL;
-    map->total_size = 0;
+    // map->total_size = 0;
     map->num_requests = 0;
     
     pthread_rwlock_init(&map->lock, NULL);
@@ -28,7 +28,7 @@ void destroy_cache_map(Cache_Map* map) {
         current = tmp;
     }
     map->first = NULL;
-    map->total_size = 0;
+    // map->total_size = 0;
     pthread_rwlock_destroy(&map->lock);
 }
 
@@ -49,6 +49,14 @@ int alloc_cache_node(Cache_Node** node, const char* key) {
     (*node)->response.data = NULL;
     (*node)->response.len = 0;
     (*node)->response.cap = 0;
+
+    (*node)->recv_cnt = 0;
+
+    atomic_store(&(*node)->ref_cnt, 0);
+
+    (*node)->ttl = DEFAULT_TTL;
+
+    atomic_store_explicit(&(*node)->hits, 0, memory_order_seq_cst);
 
     (*node)->eof = 0;
     (*node)->error = 0;
@@ -95,6 +103,12 @@ void destroy_cache_node(Cache_Node** node) {
     *node = NULL;
 }
 
+
+/*
+ * Ищет запись в кэше по ключу. Возвращает найденную запись через out_node.
+ * Если ключ не найден, создает новую запись и помечает created = true.
+ * Захватывает write lock на всю кэш мапу и mutex на ноду в случае создания новой записи.
+ */
 int get_set_cache_map(Cache_Map* map, const char* key, 
                       Cache_Node** out_node, int* created) {
     if (map == NULL || key == NULL || out_node == NULL || created == NULL) {
@@ -102,11 +116,15 @@ int get_set_cache_map(Cache_Map* map, const char* key,
     }
 
     pthread_rwlock_wrlock(&map->lock);
+    
+    map->num_requests++;
 
     Cache_Node* current = map->first;
     while (current != NULL) {
         if (strcmp(current->key, key) == 0) {
+            atomic_fetch_add(&current->hits, 1);
             *out_node = current;
+            atomic_fetch_add(&(current)->ref_cnt, 1);
             *created = 0;
             pthread_rwlock_unlock(&map->lock);
             return 0;
@@ -121,17 +139,22 @@ int get_set_cache_map(Cache_Map* map, const char* key,
 
     pthread_mutex_lock(&new_node->mutex);
     new_node->readers_num = 1;
+    atomic_fetch_add(&new_node->hits, 1);
     pthread_mutex_unlock(&new_node->mutex);
     new_node->next = map->first;
     map->first = new_node;
 
     *out_node = new_node;
+    atomic_fetch_add(&(new_node)->ref_cnt, 1);
     *created = 1;
 
     pthread_rwlock_unlock(&map->lock);
     return 0;
 }
 
+/*
+ * Создает ключ для записи вида "GET <host>:<port><relative_path_from_request>". 
+ */
 int build_cache_key(char* dst, size_t cap,
                     const char* host, const char* port,
                     const http_request* req) {
@@ -148,6 +171,10 @@ int build_cache_key(char* dst, size_t cap,
     return 0;
 }
 
+/**
+ * Создает и возвращает через reader структуру для нового читателя конкретной записи в кэше.
+ * Захватывает mutex на ноду.
+ */
 int add_reader_cache_node(Cache_Node* node, Cache_Reader** reader/*,int socket*/) {
     if (reader == NULL || node == NULL) {
         return -1;
@@ -168,6 +195,11 @@ int add_reader_cache_node(Cache_Node* node, Cache_Reader** reader/*,int socket*/
     return 0;
 }
 
+
+/**
+ * Удаляет структуру читателя для конкретной записи в кэше.
+ * Захватывает mutex на ноду.
+ */
 void remove_reader_cache_node(Cache_Node* node, Cache_Reader** reader) {
     if (reader == NULL || node == NULL) {
         return;

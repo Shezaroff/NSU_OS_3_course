@@ -220,7 +220,7 @@ int parse_host_and_port(http_request* req, char** out_host, char** out_port) {
 }
 
 
-int connect_hots(const char* host, const char* port) {
+int connect_host(const char* host, const char* port) {
     struct addrinfo hints;
     memset(&hints, 0, sizeof(hints));
     hints.ai_socktype = SOCK_STREAM;

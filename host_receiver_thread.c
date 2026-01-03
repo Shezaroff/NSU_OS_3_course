@@ -21,7 +21,7 @@ void* reciever_thread(void* arg) {
     Cache_Node* node = a->cache_node;
     int ok = 1;
 
-    int sock = connect_hots(a->host, a->port);
+    int sock = connect_host(a->host, a->port);
     if (ok && sock < 0) {
         pthread_mutex_lock(&node->mutex);
         node->error = 1;
@@ -142,6 +142,7 @@ void* reciever_thread(void* arg) {
         pthread_mutex_unlock(&node->mutex);
     }
 
+    atomic_fetch_sub(&(node->ref_cnt), 1);
     free(a->host);
     free(a->port);
     free(a->req_data);

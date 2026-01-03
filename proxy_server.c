@@ -26,7 +26,7 @@
 
 
 #define REQUEST_QUEUE_SIZE 32
-#define MAX_THREADS 512
+#define MAX_THREADS 550
 
 static Cache_Map cache;
 
@@ -127,11 +127,13 @@ void* handle_client(void* vargs)
                             cacheable = 0;
                         } else {
                             recv_args->cache_node = node;
+                            atomic_fetch_add(&(node)->ref_cnt, 1);
                             recv_args->host = strdup(host);
                             recv_args->port = strdup(port);
 
                             recv_args->req_data = malloc(built_raw_req.len);
                             if (recv_args->host == NULL || recv_args->port == NULL || recv_args->req_data == NULL) {
+                                atomic_fetch_sub(&(node->ref_cnt), 1);
                                 free(recv_args->host); 
                                 free(recv_args->port); 
                                 free(recv_args->req_data);
@@ -149,6 +151,7 @@ void* handle_client(void* vargs)
 
                                 pthread_t recv_thread;
                                 if (pthread_create(&recv_thread, NULL, reciever_thread, recv_args) != 0) {
+                                    atomic_fetch_sub(&(node->ref_cnt), 1);
                                     pthread_mutex_lock(&node->mutex);
                                     node->error = 1;
                                     pthread_cond_broadcast(&node->cond_var);
@@ -205,13 +208,14 @@ void* handle_client(void* vargs)
                             ok = 0;
                         }
                     }
+                    atomic_fetch_sub(&(node->ref_cnt), 1);
                 }
             }
         }
     }
 
     if (ok) {
-        host_sock = connect_hots(host, port);
+        host_sock = connect_host(host, port);
         if (host_sock < 0) {
             ok = 0;
             need_502 = 1;

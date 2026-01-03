@@ -12,6 +12,7 @@
 
 #define MAX_SIZE_CACHE_NODE (1ULL * 1024 * 1024 * 1024)
 #define MAX_SIZE_CACHE_MAP (2ULL * 1024 * 1024 * 1024)
+#define DEFAULT_TTL 16
 
 typedef enum {
     IN_PROGRESS,
@@ -30,15 +31,21 @@ typedef struct Cache_Reader {
 typedef struct Cache_Node {
     char* key;
     dynbuf response;
-    size_t recv_cnt;
+    size_t recv_cnt; // Сколько всего байт получено от хоста за все врем
     cache_node_state state;
 
     _Atomic uint32_t hits;
+    uint32_t ttl;
+    _Atomic uint32_t ref_cnt;
 
+    // Чтение завершено по этой причине
     int eof;
     int error;
 
+    // ответ не нужно кэшировать, при этом он раздавался уже подключившимся клиентам,
+    // но все соединения были закрыты и пора освобождать память 
     int abort_pass;
+    // тело кэша (ответ) освобожден
     int response_freed;
 
     ssize_t content_length;
@@ -46,8 +53,6 @@ typedef struct Cache_Node {
 
     Cache_Reader* readers;
     uint32_t readers_num;
-
-    // _Atomic uint32_t hits;
 
     pthread_mutex_t mutex;
     pthread_cond_t cond_var;
@@ -57,8 +62,8 @@ typedef struct Cache_Node {
 
 typedef struct Cache_Map {
     Cache_Node* first;
-    size_t total_size;
-    _Atomic uint32_t num_requests;
+    // size_t total_size;
+    uint32_t num_requests;
     pthread_rwlock_t lock;
 } Cache_Map;
 
