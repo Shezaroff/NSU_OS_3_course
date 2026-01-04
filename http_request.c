@@ -24,10 +24,6 @@ void alloc_http_request(http_request** request) {
     }
 
     init_http_request(*request);
-    // (*request)->method = NOT_IMPLEMENTED;
-    // (*request)->target_path = NULL;
-    // (*request)->version = NOT_SUPPORTED;
-    // STAILQ_INIT(&(*request)->headers);
 }
 
 
@@ -54,6 +50,9 @@ void free_http_request(http_request** req) {
     free(request);
 }
 
+/**
+ * Добавляет к созданному http_request новый header
+ */
 int add_http_header(http_request *request, const char *key, const char *value)
 {
     http_header *header = (http_header *)malloc(sizeof(*header));
@@ -72,6 +71,9 @@ int add_http_header(http_request *request, const char *key, const char *value)
     return 1;
 }
 
+/**
+ * Получает из http_request header по ключу
+ */
 const char *get_http_header(http_request* request, const char *key) {
 	http_header *item; 
 	STAILQ_FOREACH(item, &request->headers, entries) {
@@ -89,6 +91,9 @@ void init_invalid_http_request(http_request* result) {
     result->target_path = NULL;
 }
 
+/**
+ * Разбирает первую строку запроса (с методом) и складывает результата в http_request* result.
+ */
 void parse_http_request_line(http_request* result, const char* line) {
     const char *end = strstr(line, "\r\n");
     size_t n;
@@ -143,6 +148,9 @@ void parse_http_request_line(http_request* result, const char* line) {
     // или сохранять этот в кэше
 }
 
+/**
+ * Убирает пробелы в строке справа.
+ */
 void trim_right_space(char* str) {
     size_t len = strlen(str);
     while (len > 0 && (str[len - 1] == ' ' || str[len - 1] == '\t')) {
@@ -151,6 +159,9 @@ void trim_right_space(char* str) {
     }
 }
 
+/**
+ * Парсит header запроса из строки и кладет его в result.
+ */
 void parse_http_header(http_request* result, const char* line) {
     const char *end = strstr(line, "\r\n");
     size_t n;

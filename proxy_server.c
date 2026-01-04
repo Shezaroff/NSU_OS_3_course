@@ -32,11 +32,17 @@
 
 static Cache_Map cache;
 
+/**
+ * Описывает аргументы для потока-обработчика.
+ */
 typedef struct client_args {
     sem_t* server_threads_sem;
     int socket;
 } client_args;
 
+/**
+ * Отправляет клиенту ошибку на все случаи жизни.
+ */
 static void send_simple_502(int client_sock) {
     const char* resp =
         "HTTP/1.0 502 Bad Gateway\r\n"
@@ -46,6 +52,9 @@ static void send_simple_502(int client_sock) {
     (void)send_all(client_sock, resp, strlen(resp));
 }
 
+/**
+ * Аккуратно пытается закрыть сокет.
+ */
 void safe_socket_close(int* socket) {
     if (*socket >= 0) {
         close(*socket);
@@ -53,6 +62,10 @@ void safe_socket_close(int* socket) {
     }
 }
 
+/**
+ * Читает запрос от клиента. Достает хост и порт. 
+ * Строит запрос в байтовом виде для целевого сервера.
+ */
 int read_request_and_build(int client_sock, http_reader_state* st,
                            char* io_buf, size_t io_cap, size_t* io_len,
                            http_request** req_out, int* req_cl_out,
@@ -92,6 +105,11 @@ int read_request_and_build(int client_sock, http_reader_state* st,
     return 0;
 }
 
+/**
+ * Проверяет, нужно ли передавать тело запроса.
+ * Если нет Content-Length, то в случае POST вызывает ошибку,
+ * а в ином случае не передает тело.
+ */
 int should_transfer_request_body(const http_request* req, int req_cl) {
     if (req_cl > 0) {
         return 1;
@@ -105,20 +123,26 @@ int should_transfer_request_body(const http_request* req, int req_cl) {
     return 0;
 }
 
+/**
+ * Освобождает всякие выделенные при помощи malloc сущности, а убирает ссылку на запись в кэше.
+ */
 void free_info_before_return(Cache_Node* node, receiver_args* recv_args) {
+    pthread_mutex_lock(&node->mutex);
+    node->error = 1;
+    pthread_cond_broadcast(&node->cond_var);
+    pthread_mutex_unlock(&node->mutex);
+
     atomic_fetch_sub(&node->recv_cnt, 1);
     free(recv_args->host);
     free(recv_args->port);
     free(recv_args->req_data);
     free(recv_args);
-
-    pthread_mutex_lock(&node->mutex);
-    node->error = 1;
-    pthread_cond_broadcast(&node->cond_var);
-    pthread_mutex_unlock(&node->mutex);
     return;
 }
 
+/**
+ * Запускает поток, получающий данные от целевого сервера.
+ */
 int start_recv_thread(Cache_Node* node, char* host, char* port,
                       dynbuf* built_raw_req) {
     receiver_args* recv_args = malloc(sizeof(receiver_args));
@@ -156,9 +180,16 @@ int start_recv_thread(Cache_Node* node, char* host, char* port,
     return 0;
 }
 
-// Возвращает:
-//  1 - ответ получен из кэша
-//  0 - запрос не кэшируется
+/**
+ * Ищет запись в кэше. 
+ * Возвращает:
+ * 1 - ответ получен из кэша
+ * 0 - запрос не кэшируется
+ * В случае, если запись найдена и при этом 
+ * не помечена PASS, передает данные клиенту. 
+ * Если записи нет, то запускает поток для получения ответа
+ * от целевого сервера. 
+ */
 int try_cache_request(int client_sock, http_request* req,
                    int req_cl, char* host, char* port,
                    dynbuf* built_raw_req) {
@@ -221,6 +252,13 @@ int try_cache_request(int client_sock, http_request* req,
     return 1;
 }
 
+/**
+ * Читает запрос от клиента.
+ * Пытается найти данные в кэше и переслать их клиенту.
+ * В случае если сделать это не удалось по какой-то причине,
+ * то подключается напрямую к целевому серверу в обход кэш мапы
+ * и передает данные клиенту.
+ */
 int process(int* client_sock, int* host_sock,
             http_request** req, char** host, char** port,
             dynbuf* built_raw_req) {
@@ -264,6 +302,10 @@ int process(int* client_sock, int* host_sock,
     return JUST_CLEANUP;
 }
 
+/**
+ * Потоковая функция обработки клиента.
+ * Обрабатывает запрос, отчищает все использованное.
+ */
 void* handle_client(void* vargs) {
     client_args* args = (client_args*)vargs;
 
@@ -297,6 +339,9 @@ void* handle_client(void* vargs) {
     return NULL;
 }
 
+/**
+ * Инициализирует прокси сервер.
+ */
 int init_proxy_server(int* server_socket, int server_port, int requests_queue_size) {
     *server_socket = socket(AF_INET, SOCK_STREAM, 0);
     if (*server_socket == -1) {
@@ -352,7 +397,10 @@ int parse_port(const char* env_port) {
     return (int)port;
 }
 
-void* run_proxy_server(void* args) {
+/**
+ * Потоковая функция самого сервера.
+ */
+void* proxy_server(void* args) {
     int server_socket;
     char* env_port = getenv("PROXY_PORT");
     if (env_port == NULL) {
@@ -441,7 +489,7 @@ int main() {
 
     pthread_t server_thread;
 
-    if (pthread_create(&server_thread, NULL, run_proxy_server, NULL) != 0) {
+    if (pthread_create(&server_thread, NULL, proxy_server, NULL) != 0) {
         perror("error creating server thread");
         exit(EXIT_FAILURE);
     }

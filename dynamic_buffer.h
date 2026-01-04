@@ -3,6 +3,9 @@
 
 #include <stdlib.h>
 
+/**
+ * Описывает динамический буфер.
+ */
 typedef struct {
     char* data;
     size_t len;

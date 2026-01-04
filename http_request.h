@@ -30,6 +30,7 @@ typedef struct http_header {
     STAILQ_ENTRY(http_header) entries;
 } http_header;
 
+// Очередь для хранения заголовков запроса
 typedef STAILQ_HEAD(http_header_queue, http_header) http_header_queue;
 
 typedef struct http_request {

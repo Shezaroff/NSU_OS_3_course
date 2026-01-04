@@ -14,6 +14,9 @@ typedef enum {
     READ_DONE
 } http_read_state;
 
+/**
+ * Помогает функции чтения чанками определять текущее состояние чтения.
+ */
 typedef struct {
     http_read_state state;
     long body_remaining;

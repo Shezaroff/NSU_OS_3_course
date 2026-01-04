@@ -4,10 +4,16 @@
 
 #define DEFAULT_SIZE 4096
 
+/**
+ * Добавляет си-строку s в буфер.
+ */
 int dynbuf_append_str(dynbuf *buffer, const char *s) {
     return add_dynbuf(buffer, s, strlen(s));
 }
 
+/**
+ * Добавляет n байт из src в буфер.
+ */
 int add_dynbuf(dynbuf* buffer, const void* src, size_t n) {
     if (n == 0) {
         return 0;

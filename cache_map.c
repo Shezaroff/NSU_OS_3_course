@@ -225,7 +225,11 @@ void remove_reader_cache_node(Cache_Node* node, Cache_Reader** reader) {
     *reader = NULL;
 }
 
-// надо захватывать мутекс заранее
+/**
+ * Вытесняет из буфера ту часть, которая
+ * уже прочитана всеми живыми читателями.
+ * Mutex необходимо захватывать до вызова функции. 
+ */
 void trim_cache_node(Cache_Node* node) {
     if (node->state != PASS) {
         return;
@@ -270,6 +274,11 @@ void trim_cache_node(Cache_Node* node) {
 
 // надо до вызова этой функции проверять, не стоит ли состояние PASS
 // у записи кэша, чтобы не пытаться из нее читать.
+/**
+ * Пересылает данные из кэша клиенту.
+ * Если кэш был помечен PASS уже после того, как клиент
+ * получил эту ноду, то данные читаются через кэш.
+ */
 int stream_from_cache_node(Cache_Node* node, Cache_Reader *reader) {
     char buffer[8192];
 

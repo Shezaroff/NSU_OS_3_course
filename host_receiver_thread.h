@@ -4,6 +4,9 @@
 #include <stdlib.h>
 #include "cache_map.h"
 
+/**
+ * Аргументы для потока, получающего ответ от целевого сервера.
+ */
 typedef struct {
     Cache_Node* cache_node;
     char* host;

@@ -11,6 +11,9 @@
 
 #include "http_utils.h"
 
+/**
+ * Функция для нахождения конца строки запроса вида '\r\n'.
+ */
 const char* find_end_line(const char* buffer, size_t len) {
     if (len < 2) {
         return NULL;
@@ -37,6 +40,11 @@ http_chunk make_chunk_copy(const void* src, size_t n, int is_header) {
     return c;
 }
 
+/**
+ * Выдает чанками прочитанное из сокета http-сообщение.
+ * Либо строку заголовка, либо часть тела.
+ * Читает через переданный на вход буфер.
+ */
 http_chunk http_reader_next(int sock, http_reader_state* st,
                             char* buf, size_t cap, size_t* len_buf,
                             long content_length) {
@@ -131,6 +139,9 @@ http_chunk http_reader_next(int sock, http_reader_state* st,
     }
 }
 
+/**
+ * Пересылает содержимое буфера через переданный сокет.
+ */
 int send_all(int sock, const void* buf, size_t len) {
     const char* p = (const char*)buf;
     while (len > 0) {
@@ -150,6 +161,9 @@ int send_all(int sock, const void* buf, size_t len) {
     return 0;
 }
 
+/**
+ * Парсит header content length из строки запроса в число.
+ */
 long parse_content_length(http_request* req) {
     const char* cl_value = get_http_header(req, "Content-Length");
     if (cl_value == NULL) {
@@ -165,6 +179,9 @@ long parse_content_length(http_request* req) {
     return n;
 }
 
+/**
+ * Парсит хост и порт из соответствующего заголовка.
+ */
 int parse_host_and_port(http_request* req, char** out_host, char** out_port) {
     const char* host_value = get_http_header(req, "Host");
     if (host_value == NULL) {
@@ -219,7 +236,10 @@ int parse_host_and_port(http_request* req, char** out_host, char** out_port) {
     return 0;
 }
 
-
+/**
+ * Подключается к целевому серверу.
+ * В случае успеха возвращает сокет.
+ */
 int connect_host(const char* host, const char* port) {
     struct addrinfo hints;
     memset(&hints, 0, sizeof(hints));
@@ -252,6 +272,11 @@ int connect_host(const char* host, const char* port) {
     return -1;
 }
 
+/**
+ * Читает чанками HEAD запроса из сокета через переданный буфер.
+ * Складывает результата в req_out.
+ * Парсит длину запроса и складывает в content_length_out.
+ */
 int read_and_parse_request_head(int client_sock, http_reader_state *st, char *io_buf, size_t io_cap, 
                                 size_t *io_len, http_request *req_out, long *content_length_out) {
     init_http_request(req_out);
@@ -306,7 +331,9 @@ const char* version_to_str(http_version v) {
     }
 }
 
-
+/**
+ * Достает относительный путь из абсолютного.
+ */
 const char* from_absolute_path(const char *target, char *tmp, size_t tmp_cap) {
     if (target == NULL || *target == 0) {
         // return "/";
@@ -340,6 +367,10 @@ const char* from_absolute_path(const char *target, char *tmp, size_t tmp_cap) {
     return NULL;
 }
 
+/**
+ * Создает запрос в байтовом виде для целевого сервера.
+ * Отбрасывает всякие заголовки, которые, как я понял, не поддерживаются в HTTP-1.0.
+ */
 int build_request(const http_request *req, dynbuf *out) {
     if (req == NULL || out == NULL) {
         return -1;
@@ -435,7 +466,9 @@ int build_request(const http_request *req, dynbuf *out) {
     return 0;
 }
 
-
+/**
+ * Проксирует тело запроса от клиента к целевому серверу, никак не изменяя.
+ */
 int proxy_body(int from_sock, int to_sock,http_reader_state *st, char *io_buf, 
                size_t io_cap, size_t *io_len, long content_length) {
     while (1) {
@@ -453,6 +486,10 @@ int proxy_body(int from_sock, int to_sock,http_reader_state *st, char *io_buf,
     return 0;
 }
 
+/**
+ * Устаревшая функции. Сейчас не используется.
+ * Не удалил, потому что жалко.
+ */
 int proxy_response_and_maybe_cache(int upstream_sock, int client_sock, int do_cache, dynbuf *resp_acc) {
     char buf[8192];
 
@@ -477,8 +514,9 @@ int proxy_response_and_maybe_cache(int upstream_sock, int client_sock, int do_ca
     }
 }
 
-
-
+/**
+ * Функция парсит длину тела ответа от целевого сервера. 
+ */
 long parse_content_length_from_header_line(const char *line) {
     const char *p = line;
     while (*p == ' ' || *p == '\t') {
@@ -502,11 +540,12 @@ long parse_content_length_from_header_line(const char *line) {
     if (errno != 0 || end == p || n < 0) {
         return -1;
     }
-    return n; // НЕ ЗАБЫТЬ УБРАТЬ коммент
-    // return -1;
+    return n;
 }
 
-
+/**
+ * Проксирует ответ чанками напрямую от целевого сервера к клиенту.
+ */
 int proxy_response(int upstream_sock, int client_sock) {
     http_reader_state st = {.state = READ_HEAD, .body_remaining = -2};
     char io_buf[MAX_BUFFER_SIZE];

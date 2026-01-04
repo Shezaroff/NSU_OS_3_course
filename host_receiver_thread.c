@@ -2,11 +2,22 @@
 #include "http_request.h"
 #include "http_utils.h"
 
+#define RECEIVE_FINISHED 0
+#define RECEIVE_ERROR -1
+#define RECEIVE_ABORTED -2
+#define RECEIVE_OK 1
+
+/**
+ * Добавляет данные к существующей ноде кэша.
+ */
 void add_cache_node(Cache_Node* node, const void* data, size_t n) {
     add_dynbuf(&node->response, data, n);
     node->recv_cnt += n;
 }
 
+/**
+ * Аккуратно ставит PASS и смотрит на количество читателей.
+ */
 void maybe_change_to_pass(Cache_Node* node) {
     if (node->state != PASS) {
         node->state = PASS;
@@ -16,51 +27,23 @@ void maybe_change_to_pass(Cache_Node* node) {
     }
 }
 
-void* reciever_thread(void* arg) {
-    receiver_args* a = arg;
-    Cache_Node* node = a->cache_node;
-    int ok = 1;
-
-    int sock = connect_host(a->host, a->port);
-    if (ok && sock < 0) {
-        pthread_mutex_lock(&node->mutex);
-        node->error = 1;
-        pthread_cond_broadcast(&node->cond_var);
-        pthread_mutex_unlock(&node->mutex);
-        ok = 0;
-    }
-
-    if (ok && send_all(sock, a->req_data, a->req_len) != 0) {
-        pthread_mutex_lock(&node->mutex);
-        node->error = 1;
-        pthread_cond_broadcast(&node->cond_var);
-        pthread_mutex_unlock(&node->mutex);
-        close(sock);
-        ok = 0;;
-    }
-
-    http_reader_state st = {.state = READ_HEAD, .body_remaining = -2};
-    char io_buf[MAX_BUFFER_SIZE];
-    size_t io_len = 0;
-    long content_length = -1;
-
-    while (ok && 1) {
-        http_chunk chunk = http_reader_next(sock, &st, io_buf, sizeof(io_buf), &io_len, -1);
+/**
+ * Получает head ответа.
+ */
+int receive_head(int sock, http_reader_state* st,
+                 char* io_buf, size_t io_cap, size_t* io_len,
+                 long* content_length, Cache_Node* node) {
+    while (1) {
+        http_chunk chunk = http_reader_next(sock, st, io_buf, io_cap, io_len, -1);
         if (!chunk.data) { 
-            pthread_mutex_lock(&node->mutex);
-            node->error = 1;
-            pthread_cond_broadcast(&node->cond_var);
-            pthread_mutex_unlock(&node->mutex);
             close(sock);
-            ok = 0;
-            break;
+            return RECEIVE_ERROR;
         }
-        // return NULL;
 
-        if (content_length < 0) {
+        if (*content_length < 0) {
             long maybe_cl = parse_content_length_from_header_line(chunk.data);
             if (maybe_cl >= 0) {
-                content_length = maybe_cl;
+                *content_length = maybe_cl;
             }
         }
 
@@ -70,13 +53,12 @@ void* reciever_thread(void* arg) {
             pthread_mutex_unlock(&node->mutex);
             free(chunk.data);
             close(sock);
-            ok = 0;
-            break;
+            return RECEIVE_ABORTED;
         }
 
         add_cache_node(node, chunk.data, chunk.len);
 
-        if (content_length > (long)MAX_SIZE_CACHE_NODE) {
+        if (*content_length > (long)MAX_SIZE_CACHE_NODE) {
             maybe_change_to_pass(node);
         }
 
@@ -90,10 +72,20 @@ void* reciever_thread(void* arg) {
         free(chunk.data);
     }
 
-    while (ok && 1) {
-        http_chunk chunk = http_reader_next(sock, &st, io_buf, sizeof(io_buf), &io_len, content_length);
+    return RECEIVE_OK;
+}
+
+/**
+ * Получает тело ответа.
+ */
+int receive_body(int sock, http_reader_state* st, char* io_buf, size_t io_cap,
+                 size_t* io_len, long content_length, Cache_Node* node) {
+    while (1) {
+        http_chunk chunk = http_reader_next(sock, st, io_buf, io_cap, io_len, content_length);
         if (!chunk.data) {
+            close(sock);
             break;
+            // return RECEIVE_FINISHED;
         }
 
         pthread_mutex_lock(&node->mutex);
@@ -102,8 +94,7 @@ void* reciever_thread(void* arg) {
             pthread_mutex_unlock(&node->mutex);
             free(chunk.data);
             close(sock);
-            ok = 0;
-            break;
+            return RECEIVE_ABORTED;
         }
 
         add_cache_node(node, chunk.data, chunk.len);
@@ -118,18 +109,56 @@ void* reciever_thread(void* arg) {
         free(chunk.data);
     }
 
-    if (ok) {
+    return RECEIVE_FINISHED;
+}
+
+/**
+ * Подключается к целевому серверу, посылает запрос,
+ * получает head и body ответа и кладет в кэш.
+ */
+int receive(receiver_args* a) {
+    Cache_Node* node = a->cache_node;
+    int sock = connect_host(a->host, a->port);
+    if (sock < 0) {
+        return RECEIVE_ERROR;
+    }
+
+    if (send_all(sock, a->req_data, a->req_len) != 0) {
         close(sock);
+        return RECEIVE_ERROR;
+    }
+
+    http_reader_state st = {.state = READ_HEAD, .body_remaining = -2};
+    char io_buf[MAX_BUFFER_SIZE];
+    size_t io_len = 0;
+    long content_length = -1;
+
+    int rc = receive_head(sock, &st, io_buf, sizeof(io_buf), &io_len, &content_length, node);
     
-        pthread_mutex_lock(&node->mutex);
+    if (rc != RECEIVE_OK) {
+        return rc;
+    }
+
+    return receive_body(sock, &st, io_buf, sizeof(io_buf), &io_len, content_length, node);
+}
+
+/**
+ * Потоковая функция получения ответа от целевого сервера.
+ */
+void* reciever_thread(void* arg) {
+    receiver_args* a = arg;
+    Cache_Node* node = a->cache_node;
+
+    int rc = receive(a);
+    pthread_mutex_lock(&node->mutex);
+    if (rc == RECEIVE_ERROR) {
+        node->error = 1;
+    } else if (rc == RECEIVE_FINISHED) {
         node->eof = 1;
         if (node->state != PASS) {
             node->state = DONE;
         }
-        pthread_cond_broadcast(&node->cond_var);
-        pthread_mutex_unlock(&node->mutex);
-    } else {
-        pthread_mutex_lock(&node->mutex);
+    } else if (rc == RECEIVE_ABORTED) {
         node->state = PASS;
         if (!node->response_freed) {
             free_dynbuf(&node->response);
@@ -138,9 +167,9 @@ void* reciever_thread(void* arg) {
             node->response_freed = 1;
         }
         node->eof = 1;
-        pthread_cond_broadcast(&node->cond_var);
-        pthread_mutex_unlock(&node->mutex);
     }
+    pthread_cond_broadcast(&node->cond_var);
+    pthread_mutex_unlock(&node->mutex);
 
     atomic_fetch_sub(&(node->ref_cnt), 1);
     free(a->host);

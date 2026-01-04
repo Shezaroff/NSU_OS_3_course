@@ -4,6 +4,9 @@
 #include <stdlib.h>
 #include "cache_map.h"
 
+/**
+ * Аргументы для потока отчистки.
+ */
 typedef struct {
     Cache_Map *map;
     size_t max_size_bytes;        
