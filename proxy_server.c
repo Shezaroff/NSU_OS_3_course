@@ -503,3 +503,4 @@ int main() {
 
 // curl -L --http1.0   -x http://127.0.0.1:5423   -o debian1.iso   http://cdimage.debian.org/debian-cd/current/amd64/iso-cd/debian-13.2.0-amd64-netinst.iso
 // curl -L --http1.0   -x http://127.0.0.1:5423   -o debian4.iso   http://cdimage.debian.org/debian-cd/current/arm64/iso-cd/debian-13.2.0-arm64-netinst.iso
+// curl -L --http1.0   -x http://127.0.0.1:5423   -o /dev/null http://cdimage.debian.org/debian-cd/current/amd64/iso-cd/debian-13.3.0-amd64-netinst.iso

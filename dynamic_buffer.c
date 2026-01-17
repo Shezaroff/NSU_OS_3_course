@@ -11,14 +11,7 @@ int dynbuf_append_str(dynbuf *buffer, const char *s) {
     return add_dynbuf(buffer, s, strlen(s));
 }
 
-/**
- * Добавляет n байт из src в буфер.
- */
-int add_dynbuf(dynbuf* buffer, const void* src, size_t n) {
-    if (n == 0) {
-        return 0;
-    }
-
+int maybe_increase_dynbuf(dynbuf* buffer, size_t n) {
     if (buffer->len + n > buffer->cap) {
         
         size_t new_cap;
@@ -40,6 +33,21 @@ int add_dynbuf(dynbuf* buffer, const void* src, size_t n) {
         buffer->data = p;
         buffer->cap = new_cap;
     }
+
+    return 0;
+}
+
+/**
+ * Добавляет n байт из src в буфер.
+ */
+int add_dynbuf(dynbuf* buffer, const void* src, size_t n) {
+    if (n == 0) {
+        return 0;
+    }
+
+    if (maybe_increase_dynbuf(buffer, n) == -1) {
+        return -1;
+    }    
 
     memcpy(buffer->data + buffer->len, src, n);
     buffer->len += n;

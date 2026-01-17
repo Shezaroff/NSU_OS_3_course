@@ -103,6 +103,37 @@ void destroy_cache_node(Cache_Node** node) {
     *node = NULL;
 }
 
+Cache_Node* get_node(Cache_Map* map, const char* key) {
+    Cache_Node* current = map->first;
+    while (current != NULL) {
+        if (strcmp(current->key, key) == 0) {
+            atomic_fetch_add(&current->hits, 1);
+            // *out_node = current;
+            // atomic_fetch_add(&(current)->ref_cnt, 1);
+            // *created = 0;
+            // pthread_rwlock_unlock(&map->lock);
+            break;;
+        }
+        current = current->next;
+    }
+
+    return current;
+}
+
+Cache_Node* create_and_add_new_node(Cache_Map* map, const char* key) {
+    Cache_Node* new_node;
+    if (alloc_cache_node(&new_node, key) == -1) {
+        return NULL;
+    }
+
+    pthread_mutex_lock(&new_node->mutex);
+    new_node->readers_num = 1;
+    atomic_fetch_add(&new_node->hits, 1);
+    pthread_mutex_unlock(&new_node->mutex);
+    new_node->next = map->first;
+    map->first = new_node;
+    return new_node;
+}
 
 /*
  * Ищет запись в кэше по ключу. Возвращает найденную запись через out_node.
@@ -119,34 +150,27 @@ int get_set_cache_map(Cache_Map* map, const char* key,
     
     map->num_requests++;
 
-    Cache_Node* current = map->first;
-    while (current != NULL) {
-        if (strcmp(current->key, key) == 0) {
-            atomic_fetch_add(&current->hits, 1);
-            *out_node = current;
-            atomic_fetch_add(&(current)->ref_cnt, 1);
-            *created = 0;
-            pthread_rwlock_unlock(&map->lock);
-            return 0;
-        }
-        current = current->next;
+    Cache_Node* node_in_map = get_node(map, key);
+
+    Cache_Node* new_node = NULL;
+    if (node_in_map == NULL) {
+        new_node = create_and_add_new_node(map, key);
     }
-    Cache_Node* new_node;
-    if (alloc_cache_node(&new_node, key) == -1) {
+
+    if (node_in_map == NULL && new_node == NULL) {
         pthread_rwlock_unlock(&map->lock);
         return -1;
     }
 
-    pthread_mutex_lock(&new_node->mutex);
-    new_node->readers_num = 1;
-    atomic_fetch_add(&new_node->hits, 1);
-    pthread_mutex_unlock(&new_node->mutex);
-    new_node->next = map->first;
-    map->first = new_node;
+    // if (new_node != NULL) {
+    //     *created = 1;
+    // } else if (node_in_map != NULL) {
+    //     *created = 0;
+    // }
 
-    *out_node = new_node;
-    atomic_fetch_add(&(new_node)->ref_cnt, 1);
-    *created = 1;
+    *created = (new_node != NULL);
+    *out_node = new_node ? new_node : node_in_map;
+    atomic_fetch_add(&(*out_node)->ref_cnt, 1);
 
     pthread_rwlock_unlock(&map->lock);
     return 0;
@@ -195,6 +219,13 @@ int add_reader_cache_node(Cache_Node* node, Cache_Reader** reader/*,int socket*/
     return 0;
 }
 
+void remove_reader(Cache_Node* node, Cache_Reader** prev_ptr, Cache_Reader** target) {
+    *prev_ptr = (*target)->next;
+    node->readers_num--;
+    if (node->readers_num == 0 && node->state == PASS) {
+        node->abort_pass = 1;
+    }
+}
 
 /**
  * Удаляет структуру читателя для конкретной записи в кэше.
@@ -209,11 +240,7 @@ void remove_reader_cache_node(Cache_Node* node, Cache_Reader** reader) {
     Cache_Reader **prev_ptr = &node->readers;
     while (*prev_ptr != NULL) {
         if (*prev_ptr == *reader) {
-            *prev_ptr = (*reader)->next;
-            node->readers_num--;
-            if (node->readers_num == 0 && node->state == PASS) {
-                node->abort_pass = 1;
-            }
+            remove_reader(node, prev_ptr, reader);
             break;
         }
         prev_ptr = &(*prev_ptr)->next;
@@ -272,6 +299,29 @@ void trim_cache_node(Cache_Node* node) {
     node->base_offset += cut;
 }
 
+size_t copy_data_ready_to_be_sent(Cache_Node* node, Cache_Reader* reader, char* buffer, size_t cap) {
+    size_t start_in_response = reader->offset - node->base_offset;
+    size_t ready_in_buffer = 0;
+    if (start_in_response < node->response.len) {
+        ready_in_buffer = node->response.len - start_in_response;
+    }
+    size_t ready_total = node->recv_cnt - reader->offset;
+    if (ready_in_buffer > ready_total) {
+        // тоже какая-то странная ситуация:
+        // получается что фактически доступное в буфере
+        // больше доступного по расчетам
+        fprintf(stderr, "maybe?? unexpected?? error in stream_from_cache_node()\n");
+        ready_in_buffer = ready_total;
+    }
+    if (ready_in_buffer > cap) {
+        ready_in_buffer = cap;
+    }
+
+    memcpy(buffer, node->response.data + start_in_response, ready_in_buffer);
+    
+    return ready_in_buffer;
+}
+
 // надо до вызова этой функции проверять, не стоит ли состояние PASS
 // у записи кэша, чтобы не пытаться из нее читать.
 /**
@@ -305,24 +355,8 @@ int stream_from_cache_node(Cache_Node* node, Cache_Reader *reader) {
             return -1;
         }
 
-        size_t start_in_response = reader->offset - node->base_offset;
-        size_t ready_in_buffer = 0;
-        if (start_in_response < node->response.len) {
-            ready_in_buffer = node->response.len - start_in_response;
-        }
-        size_t ready_total = node->recv_cnt - reader->offset;
-        if (ready_in_buffer > ready_total) {
-            // тоже какая-то странная ситуация:
-            // получается что фактически доступное в буфере
-            // больше доступного по расчетам
-            fprintf(stderr, "maybe?? unexpected?? error in stream_from_cache_node()\n");
-            ready_in_buffer = ready_total;
-        }
-        if (ready_in_buffer > sizeof(buffer)) {
-            ready_in_buffer = sizeof(buffer);
-        }
+        size_t ready_in_buffer = copy_data_ready_to_be_sent(node, reader, buffer, sizeof(buffer));
 
-        memcpy(buffer, node->response.data + start_in_response, ready_in_buffer);
         pthread_mutex_unlock(&node->mutex);
 
         if (send_all(reader->socket, buffer, ready_in_buffer) != 0) {

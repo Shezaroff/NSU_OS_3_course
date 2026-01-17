@@ -116,7 +116,7 @@ int receive_body(int sock, http_reader_state* st, char* io_buf, size_t io_cap,
  * Подключается к целевому серверу, посылает запрос,
  * получает head и body ответа и кладет в кэш.
  */
-int receive(receiver_args* a) {
+int connect_and_receive(receiver_args* a) {
     Cache_Node* node = a->cache_node;
     int sock = connect_host(a->host, a->port);
     if (sock < 0) {
@@ -149,7 +149,7 @@ void* reciever_thread(void* arg) {
     receiver_args* a = arg;
     Cache_Node* node = a->cache_node;
 
-    int rc = receive(a);
+    int rc = connect_and_receive(a);
     pthread_mutex_lock(&node->mutex);
     if (rc == RECEIVE_ERROR) {
         node->error = 1;
