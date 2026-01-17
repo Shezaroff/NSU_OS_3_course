@@ -91,6 +91,34 @@ void init_invalid_http_request(http_request* result) {
     result->target_path = NULL;
 }
 
+int parse_method(const char* method_str, int* out_method) {
+    if (!method_str || !out_method) {
+        return -1;
+    }
+
+    for (int i = 0; i < METHODS_NUM; i++) {
+        if (strcmp(method_str, http_method_names[i]) == 0) {
+            *out_method = i;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+int parse_http_version(const char* version_str) {
+    if (!version_str) {
+        return NOT_SUPPORTED;
+    }
+
+    if (strcmp(version_str, "HTTP/1.0") == 0) {
+        return HTTP_1_0;
+    }
+    if (strcmp(version_str, "HTTP/1.1") == 0) {
+        return HTTP_1_1;
+    }
+    return NOT_SUPPORTED;
+}
+
 /**
  * Разбирает первую строку запроса (с методом) и складывает результата в http_request* result.
  */
@@ -122,28 +150,16 @@ void parse_http_request_line(http_request* result, const char* line) {
         return;
     }
 
-    int found = 0;
-    for (int i = 0; i < METHODS_NUM; i++) {
-        if (strcmp(method, http_method_names[i]) == 0) {
-            result->method = i;
-            found = 1;
-            break;
-        }
-    }
-    if (!found) {
+    int parsed_method = 0;
+    if (parse_method(method, &parsed_method) != 0) {
         init_invalid_http_request(result);
         return;
     }
+    result->method = parsed_method;
 
     result->target_path = strdup(url);
 
-    if (strcmp(version, "HTTP/1.0") == 0) {
-        result->version = HTTP_1_0;
-    } else if (strcmp(version, "HTTP/1.1") == 0) {
-        result->version = HTTP_1_1;
-    } else {
-        result->version = NOT_SUPPORTED;
-    }
+    result->version = parse_http_version(version);
     // Тут надо еще прикинуть, нужно ли возвращать полностью неверный запрос
     // или сохранять этот в кэше
 }

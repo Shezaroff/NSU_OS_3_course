@@ -27,6 +27,13 @@ void maybe_change_to_pass(Cache_Node* node) {
     }
 }
 
+void maybe_set_content_length(long* content_length, http_chunk* chunk) {
+    long maybe_cl = parse_content_length_from_header_line(chunk->data);
+    if (maybe_cl >= 0) {
+        *content_length = maybe_cl;
+    }
+}
+
 /**
  * Получает head ответа.
  */
@@ -41,10 +48,7 @@ int receive_head(int sock, http_reader_state* st,
         }
 
         if (*content_length < 0) {
-            long maybe_cl = parse_content_length_from_header_line(chunk.data);
-            if (maybe_cl >= 0) {
-                *content_length = maybe_cl;
-            }
+            maybe_set_content_length(content_length, &chunk);
         }
 
         pthread_mutex_lock(&node->mutex);
