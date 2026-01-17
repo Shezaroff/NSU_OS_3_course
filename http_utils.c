@@ -40,6 +40,95 @@ http_chunk make_chunk_copy(const void* src, size_t n, int is_header) {
     return c;
 }
 
+int handle_read_head(http_reader_state* st,
+                     char* buf, size_t* len_buf,
+                     long content_length,
+                     http_chunk* out) {
+
+    const char* end = find_end_line(buf, *len_buf);
+    if (end == NULL) {
+        return 0; 
+    }
+
+    size_t line_len = (size_t)(end - buf) + 2;
+    *out = make_chunk_copy(buf, line_len, 1);
+    if (out->data == NULL) {
+        return -1; 
+    }
+
+    memmove(buf, buf + line_len, *len_buf - line_len);
+    *len_buf -= line_len;
+
+    if (line_len == 2) {
+        st->state = READ_BODY;
+        if (content_length >= 0) {
+            st->body_remaining = content_length;
+        } else {
+            st->body_remaining = -1;
+        }
+        
+        if (st->body_remaining == 0) {
+            st->state = READ_DONE;
+        }
+    }
+
+    return 1;
+}
+
+int handle_read_body(http_reader_state* st,
+                     char* buf, size_t cap, size_t* len_buf,
+                     http_chunk* out) {
+    if (st->body_remaining == 0) {
+        st->state = READ_DONE;
+        return 0; 
+    }
+
+    if (*len_buf == 0) {
+        return 0; 
+    }
+
+    size_t want = *len_buf;
+    if (want > cap) {
+        want = cap;
+    }
+
+    if (st->body_remaining > 0 && want > (size_t)st->body_remaining) {
+        want = (size_t)st->body_remaining;
+    }
+
+    *out = make_chunk_copy(buf, want, 0);
+    if (out->data == NULL) {
+        return -1;
+    }
+
+    memmove(buf, buf + want, *len_buf - want);
+    *len_buf -= want;
+
+    if (st->body_remaining > 0) {
+        st->body_remaining -= (long)want;
+    }
+
+    return 1;
+}
+
+int handle_state(http_reader_state* st, long content_length,
+                 char* buf, size_t cap, size_t* len_buf,
+                 http_chunk* out) {
+    if (st->state == READ_DONE) {
+        return 1;
+    }
+
+    if (st->state == READ_HEAD) {
+        return handle_read_head(st, buf, len_buf, content_length, out);
+    }
+
+    if (st->state == READ_BODY) {
+        return handle_read_body(st, buf, cap, len_buf, out);
+    }
+    
+    return -1;
+}
+
 /**
  * Выдает чанками прочитанное из сокета http-сообщение.
  * Либо строку заголовка, либо часть тела.
@@ -54,69 +143,12 @@ http_chunk http_reader_next(int sock, http_reader_state* st,
     }
 
     while (1) {
-        if (st->state == READ_DONE) {
+        int rc = handle_state(st, content_length, buf, cap, len_buf, &out);
+        if (rc == 1) {
             return out;
         }
-
-        if (st->state == READ_HEAD) {
-            const char* end = find_end_line(buf, *len_buf);
-            if (end != NULL) {
-                size_t line_len = (size_t)(end - buf) + 2; 
-                out = make_chunk_copy(buf, line_len, 1);
-                if (out.data == NULL) {
-                    return (http_chunk){0};
-                } 
-
-                memmove(buf, buf + line_len, *len_buf - line_len);
-                *len_buf -= line_len;
-
-                if (line_len == 2) {
-                    st->state = READ_BODY;
-                    if (content_length >= 0) {
-                        st->body_remaining = content_length;
-                    } else {
-                        st->body_remaining = -1;
-                    }
-
-                    if (st->body_remaining == 0) {
-                        st->state = READ_DONE;
-                    }
-                }
-
-                return out;
-            }
-        }
-
-        if (st->state == READ_BODY) {
-            if (st->body_remaining == 0) {
-                st->state = READ_DONE;
-                return (http_chunk){0};
-            }
-
-            if (*len_buf > 0) {
-                size_t want = *len_buf;
-                if (want > cap) {
-                    want = cap;
-                }
-
-                if (st->body_remaining > 0 && want > (size_t)st->body_remaining) {
-                    want = (size_t)st->body_remaining;
-                }
-
-                out = make_chunk_copy(buf, want, 0);
-                if (out.data == NULL) {
-                    return (http_chunk){0};
-                }
-
-                memmove(buf, buf + want, *len_buf - want);
-                *len_buf -= want;
-
-                if (st->body_remaining > 0) {
-                    st->body_remaining -= (long)want;
-                }
-
-                return out;
-            }
+        if (rc == -1) {
+            return (http_chunk){0};
         }
 
         if (*len_buf == cap) {
@@ -126,11 +158,6 @@ http_chunk http_reader_next(int sock, http_reader_state* st,
 
         ssize_t n = recv(sock, buf + *len_buf, cap - *len_buf, 0);
         if (n <= 0) {
-            if (st->state == READ_BODY && st->body_remaining == -1) {
-                st->state = READ_DONE;
-                return (http_chunk){0};
-            }
-
             st->state = READ_DONE;
             return (http_chunk){0};
         }
@@ -146,13 +173,9 @@ int send_all(int sock, const void* buf, size_t len) {
     const char* p = (const char*)buf;
     while (len > 0) {
         ssize_t n = send(sock, p, len, 0);
-        if (n < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            return -1;
-        }
-        if (n == 0) {
+        if (n < 0 && errno == EINTR) {
+            continue;
+        } else if (n <= 0) {
             return -1;
         }
         p += (size_t)n;
@@ -179,6 +202,37 @@ long parse_content_length(http_request* req) {
     return n;
 }
 
+int maybe_split_host_port(char* tmp, char** out_host, char** out_port) {
+    char* sep = strchr(tmp, ':');
+    if (!sep) {
+        return 1; 
+    }
+
+    *sep = '\0';
+    sep++;
+
+    while (*sep == ' ' || *sep == '\t') {
+        sep++;
+    }
+    if (*sep == '\0') {
+        free(tmp);
+        return -1;
+    }
+
+    *out_host = strdup(tmp);
+    *out_port = strdup(sep);
+    free(tmp);
+
+    if (*out_host == NULL || *out_port == NULL) {
+        free(*out_host);
+        free(*out_port);
+        return -1;
+    }
+
+    return 0;
+}
+
+
 /**
  * Парсит хост и порт из соответствующего заголовка.
  */
@@ -202,27 +256,9 @@ int parse_host_and_port(http_request* req, char** out_host, char** out_port) {
         memmove(tmp, p, strlen(p) + 1);
     } 
 
-    char* sep = strchr(tmp, ':');
-    if (sep) {
-        *sep = '\0';
-        sep++;
-        while (*sep == ' ' || *sep == '\t') {
-            sep++;
-        }
-        if (*sep == '\0') { 
-            free(tmp); 
-            return -1; 
-        }
-
-        *out_host = strdup(tmp);
-        *out_port = strdup(sep);
-        free(tmp);
-        if (*out_host == NULL || *out_port == NULL) {
-            free(*out_host); 
-            free(*out_port);
-            return -1;
-        }
-        return 0;
+    int rc = maybe_split_host_port(tmp, out_host, out_port);
+    if (rc != 1) {
+        return rc;
     }
 
     *out_host = strdup(tmp);
@@ -235,6 +271,21 @@ int parse_host_and_port(http_request* req, char** out_host, char** out_port) {
     }
     return 0;
 }
+
+int try_connect_addr(const struct addrinfo* ai) {
+    int sock = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+    if (sock < 0) {
+        return -1;
+    }
+
+    if (connect(sock, ai->ai_addr, ai->ai_addrlen) == 0) {
+        return sock;
+    }
+
+    close(sock);
+    return -1;
+}
+
 
 /**
  * Подключается к целевому серверу.
@@ -255,14 +306,10 @@ int connect_host(const char* host, const char* port) {
     int sock = -1;
     struct addrinfo *iter = res;
     while (iter) {
-        sock = socket(iter->ai_family, iter->ai_socktype, iter->ai_protocol);
+        sock = try_connect_addr(iter);
         if (sock >= 0) {
-            if (connect(sock, iter->ai_addr, iter->ai_addrlen) == 0) {
-                freeaddrinfo(res);
-                return sock;
-            }
-            close(sock);
-            sock = -1;
+            freeaddrinfo(res);
+            return sock;
         }
         iter = iter->ai_next;
     }
@@ -317,7 +364,6 @@ int read_and_parse_request_head(int client_sock, http_reader_state *st, char *io
 const char* method_to_str(http_method m) {
     extern const char* http_method_names[];
     if ((int)m < 0 || (int)m >= METHODS_NUM - 1) {
-        // return "GET";
         return NULL;
     }
     return http_method_names[m];
@@ -367,6 +413,58 @@ const char* from_absolute_path(const char *target, char *tmp, size_t tmp_cap) {
     return NULL;
 }
 
+int append_filtered_headers_to_request(const http_request *req, dynbuf *out) {
+    http_header *h;
+    STAILQ_FOREACH(h, &req->headers, entries) {
+        if (!h->key || !h->value) {
+            continue;
+        }
+
+        if (strcasecmp(h->key, "Proxy-Connection") == 0) {
+            continue;
+        }
+        if (strcasecmp(h->key, "Proxy-Authenticate") == 0) {
+            continue;
+        }
+        if (strcasecmp(h->key, "Proxy-Authorization") == 0) {
+            continue;
+        }
+        if (strcasecmp(h->key, "Connection") == 0) {
+            continue;
+        }
+
+        if (strcasecmp(h->key, "Keep-Alive") == 0) {
+            continue;
+        }
+        if (strcasecmp(h->key, "TE") == 0) {
+            continue;
+        }
+        if (strcasecmp(h->key, "Trailer") == 0) {
+            continue;
+        }
+        if (strcasecmp(h->key, "Upgrade") == 0) {
+            continue;
+        }
+
+        size_t need = strlen(h->key) + 2 + strlen(h->value) + 2 + 1;
+        char *line = (char*)malloc(need);
+        if (line == NULL) {
+            return -1;
+        }
+
+        snprintf(line, need, "%s: %s\r\n", h->key, h->value);
+
+        int rc = dynbuf_append_str(out, line);
+        free(line);
+        if (rc != 0) {
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+
 /**
  * Создает запрос в байтовом виде для целевого сервера.
  * Отбрасывает всякие заголовки, которые, как я понял, не поддерживаются в HTTP-1.0.
@@ -404,53 +502,9 @@ int build_request(const http_request *req, dynbuf *out) {
         return -1;
     }
 
-    http_header *h;
-    STAILQ_FOREACH(h, &req->headers, entries) {
-        if (!h->key || !h->value) {
-            continue;
-        }
-
-        if (strcasecmp(h->key, "Proxy-Connection") == 0) {
-            continue;
-        }
-        if (strcasecmp(h->key, "Proxy-Authenticate") == 0) {
-            continue;
-        }
-        if (strcasecmp(h->key, "Proxy-Authorization") == 0) {
-            continue;
-        }
-        if (strcasecmp(h->key, "Connection") == 0) {
-            continue;
-        }
-
-        if (strcasecmp(h->key, "Keep-Alive") == 0) {
-            continue;
-        }
-        if (strcasecmp(h->key, "TE") == 0) {
-            continue;
-        }
-        if (strcasecmp(h->key, "Trailer") == 0) {
-            continue;
-        }
-        if (strcasecmp(h->key, "Upgrade") == 0) {
-            continue;
-        }
-
-        size_t need = strlen(h->key) + 2 + strlen(h->value) + 2 + 1;
-        char *line = (char*)malloc(need);
-        if (line == NULL) { 
-            free_dynbuf(out); 
-            return -1; 
-        }
-
-        snprintf(line, need, "%s: %s\r\n", h->key, h->value);
-
-        int rc = dynbuf_append_str(out, line);
-        free(line);
-        if (rc != 0) { 
-            free_dynbuf(out); 
-            return -1; 
-        }
+    if (append_filtered_headers_to_request(req, out) != 0) {
+        free_dynbuf(out);
+        return -1; 
     }
 
     if (dynbuf_append_str(out, "Connection: close\r\n") != 0) {
@@ -543,6 +597,71 @@ long parse_content_length_from_header_line(const char *line) {
     return n;
 }
 
+void maybe_set_cl(long* content_length, http_chunk* c) {
+    long v = parse_content_length_from_header_line(c->data);
+    if (v >= 0) {
+        *content_length = v;
+    } else if (v == -1) {
+        *content_length = -1;
+    }
+}
+
+int proxy_response_headers(int upstream_sock, int client_sock,
+                           http_reader_state *st,
+                           char *io_buf, size_t io_cap, size_t *io_len,
+                           long *content_length) {
+    while (1) {
+        http_chunk c = http_reader_next(upstream_sock, st, io_buf, io_cap, io_len, -1);
+        if (c.data == NULL) {
+            return -1;
+        }
+
+        if (!c.is_header) {
+            free(c.data);
+            return -1;
+        }
+
+        if (*content_length < 0) {
+            maybe_set_cl(content_length, &c);
+        }
+
+        if (send_all(client_sock, c.data, c.len) != 0) {
+            free(c.data);
+            return -1;
+        }
+
+        if (c.len == 2 && memcmp(c.data, "\r\n", 2) == 0) {
+            free(c.data);
+            break;
+        }
+
+        free(c.data);
+    }
+
+    return 0;
+}
+
+int proxy_response_body(int upstream_sock, int client_sock,
+                        http_reader_state *st,
+                        char *io_buf, size_t io_cap, size_t *io_len,
+                        long content_length) {
+    while (1) {
+        http_chunk c = http_reader_next(upstream_sock, st, io_buf, io_cap, io_len, content_length);
+        if (c.data == NULL) {
+            break;
+        }
+
+        if (send_all(client_sock, c.data, c.len) != 0) {
+            free(c.data);
+            return -1;
+        }
+
+        free(c.data);
+    }
+
+    return 0;
+}
+
 /**
  * Проксирует ответ чанками напрямую от целевого сервера к клиенту.
  */
@@ -553,49 +672,16 @@ int proxy_response(int upstream_sock, int client_sock) {
 
     long content_length = -1;
 
-    while (1) {
-        http_chunk c = http_reader_next(upstream_sock, &st, io_buf, sizeof(io_buf), &io_len, -1);
-        if (c.data == NULL) {
-            return -1;
-        } 
-
-        if (!c.is_header) { 
-            free(c.data); 
-            return -1; 
-        }
-
-        if (content_length < 0) {
-            long v = parse_content_length_from_header_line(c.data);
-            if (v >= 0) {
-                content_length = v;
-            } else if (v == -1) {
-                content_length = -1;
-            }
-        }
-
-        if (send_all(client_sock, c.data, c.len) != 0) { 
-            free(c.data); 
-            return -1; 
-        }
-
-        if (c.len == 2 && memcmp(c.data, "\r\n", 2) == 0) {
-            free(c.data);
-            break;
-        }
-        free(c.data);
+    if (proxy_response_headers(upstream_sock, client_sock,
+                               &st, io_buf, sizeof(io_buf), &io_len,
+                               &content_length) != 0) {
+        return -1;
     }
 
-    while (1) {
-        http_chunk c = http_reader_next(upstream_sock, &st, io_buf, sizeof(io_buf), &io_len, content_length);
-        if (c.data == NULL) {
-            break;
-        }
-
-        if (send_all(client_sock, c.data, c.len) != 0) { 
-            free(c.data); 
-            return -1; 
-        }
-        free(c.data);
+    if (proxy_response_body(upstream_sock, client_sock,
+                            &st, io_buf, sizeof(io_buf), &io_len,
+                            content_length) != 0) {
+        return -1;
     }
 
     return 0;
